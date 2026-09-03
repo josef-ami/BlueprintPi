@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Perception calibration</title>
+<style>
+  :root{
+    /* palette taken from the WRO field spec: mat, border, track lines, pillars */
+    --mat:#FCFCFA;
+    --navy:#0D1B3E;
+    --navy-soft:#2A3A63;
+    --rule:#D8D8D2;
+    --orange:#EF6C1A;
+    --blue:#1B3FD8;
+    --red:#EE2737;
+    --green:#44D62C;
+    --magenta:#FF00FF;
+    --ink:#14161C;
+    --muted:#6A6E78;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    background:var(--mat);
+    color:var(--ink);
+    font-family:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    font-size:15px;
+    line-height:1.5;
+  }
+  .num{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+       font-variant-numeric:tabular-nums}
+
+  header{
+    background:var(--navy);color:#fff;
+    display:flex;align-items:center;gap:24px;
+    padding:12px 20px;
+  }
+  header h1{font-size:16px;font-weight:600;margin:0;letter-spacing:.01em}
+  .pills{display:flex;gap:8px;margin-left:auto;align-items:center}
+  .pill{
+    display:inline-flex;align-items:center;gap:7px;
+    background:var(--navy-soft);border-radius:999px;
+    padding:4px 12px;font-size:13px;
+  }
+  .dot{width:8px;height:8px;border-radius:50%;background:#888}
+  .dot.on{background:var(--green)}
+  .dot.off{background:var(--red)}
+
+  button{
+    font:inherit;border:1px solid var(--navy);background:#fff;color:var(--navy);
+    border-radius:4px;padding:6px 14px;cursor:pointer;
+  }
+  button:hover{background:#F0F1F5}
+  button:focus-visible{outline:3px solid var(--orange);outline-offset:2px}
+  .save{background:var(--orange);border-color:var(--orange);color:#fff;font-weight:600}
+  .save:hover{background:#D75E12}
+  .save[disabled]{opacity:.5;cursor:default}
+
+  main{
+    display:grid;grid-template-columns:minmax(0,1.55fr) minmax(320px,1fr);
+    gap:0;align-items:start;
+  }
+  .col-video{border-right:1px solid var(--rule);min-width:0}
+  section{padding:18px 20px;border-bottom:1px solid var(--rule)}
+  section h2{font-size:13px;font-weight:600;color:var(--muted);margin:0 0 12px}
+
+  .tabs{display:flex;gap:2px;margin-bottom:12px;flex-wrap:wrap}
+  .tabs button{border-radius:0;border-color:var(--rule);color:var(--muted)}
+  .tabs button[aria-pressed="true"]{
+    background:var(--navy);border-color:var(--navy);color:#fff;font-weight:600}
+  #feed{width:100%;display:block;background:#000;border:1px solid var(--navy);
+        aspect-ratio:4/3;object-fit:contain}
+  .hint{color:var(--muted);font-size:13px;margin:10px 0 0}
+
+  .swatches{display:flex;gap:6px;margin-bottom:14px}
+  .sw{
+    flex:1;border:2px solid var(--rule);background:#fff;border-radius:4px;
+    padding:7px 4px;cursor:pointer;font-size:13px;font-weight:600;
+  }
+  .sw[aria-pressed="true"]{color:#fff}
+  .sw[data-c="RED"][aria-pressed="true"]{background:var(--red);border-color:var(--red)}
+  .sw[data-c="GREEN"][aria-pressed="true"]{background:var(--green);border-color:var(--green);color:#14161C}
+  .sw[data-c="MAGENTA"][aria-pressed="true"]{background:var(--magenta);border-color:var(--magenta)}
+
+  .rng{margin-bottom:9px}
+  .rng label{display:flex;justify-content:space-between;font-size:13px;
+             color:var(--muted);margin-bottom:2px}
+  .rng label b{color:var(--ink);font-weight:600}
+  input[type=range]{width:100%;accent-color:var(--blue);margin:0}
+  .band{border-left:3px solid var(--blue);padding-left:12px;margin-bottom:16px}
+  .band .cap{font-size:12px;color:var(--muted);margin-bottom:8px}
+
+  .row{display:flex;gap:10px;align-items:center;justify-content:space-between}
+  .switch{display:flex;align-items:center;gap:8px;font-size:14px}
+
+  .bottom{display:grid;grid-template-columns:auto minmax(0,1fr);gap:20px;
+          padding:18px 20px}
+  #radar{border:1px solid var(--navy);background:#fff;display:block}
+  table{border-collapse:collapse;width:100%;font-size:14px}
+  th,td{text-align:left;padding:5px 10px 5px 0;border-bottom:1px solid var(--rule)}
+  th{color:var(--muted);font-weight:600;font-size:12px}
+  .chip{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:7px}
+  .empty{color:var(--muted);font-style:italic}
+  @media (max-width:900px){
+    main{grid-template-columns:1fr}
+    .col-video{border-right:none}
+    .bottom{grid-template-columns:1fr}
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Perception calibration</h1>
+  <div class="pills">
+    <span class="pill"><span class="dot" id="d-cam"></span>Camera</span>
+    <span class="pill"><span class="dot" id="d-lidar"></span>Lidar</span>
+    <button class="save" id="save">Save to config.json</button>
+  </div>
+</header>
+
+<main>
+  <div class="col-video">
+    <section style="border-bottom:none">
+      <div class="tabs" role="group">
+        <button data-v="blobs"   aria-pressed="true">Detected blobs</button>
+        <button data-v="mask"    aria-pressed="false">Mask</button>
+        <button data-v="overlay" aria-pressed="false">Overlay</button>
+        <button data-v="raw"     aria-pressed="false">Raw</button>
+      </div>
+      <img id="feed" alt="Camera feed">
+      <p class="hint" id="feedhint"></p>
+    </section>
+  </div>
+
+  <div>
+    <section>
+      <h2>Colour</h2>
+      <div class="swatches" role="group">
+        <button class="sw" data-c="RED" aria-pressed="true">Red</button>
+        <button class="sw" data-c="GREEN" aria-pressed="false">Green</button>
+        <button class="sw" data-c="MAGENTA" aria-pressed="false">Magenta</button>
+      </div>
+      <div id="bands"></div>
+    </section>
+
+    <section>
+      <h2>Camera geometry</h2>
+      <div class="rng">
+        <label for="hfov">Horizontal field of view <b><span id="hfov-v" class="num"></span>°</b></label>
+        <input type="range" id="hfov" min="20" max="180" step="0.5">
+      </div>
+      <div class="rng">
+        <label for="area">Minimum blob area <b><span id="area-v" class="num"></span> px</b></label>
+        <input type="range" id="area" min="0" max="5000" step="25">
+      </div>
+      <div class="row" style="margin-top:14px">
+        <label class="switch">
+          <input type="checkbox" id="swap"> Swap red and blue channels
+        </label>
+        <button id="revert">Revert to saved</button>
+      </div>
+      <p class="hint">Turn the swap on if red objects look blue in the raw view.</p>
+    </section>
+  </div>
+</main>
+
+<div class="bottom">
+  <div>
+    <h2 style="font-size:13px;color:var(--muted);margin:0 0 12px">World state</h2>
+    <canvas id="radar" width="380" height="380"></canvas>
+    <p class="hint">Robot at centre, forward is up. Ring spacing 500&nbsp;mm.</p>
+  </div>
+  <div>
+    <h2 style="font-size:13px;color:var(--muted);margin:0 0 12px">
+      Fused obstacles &nbsp;·&nbsp; front <span class="num" id="front">—</span>
+    </h2>
+    <table>
+      <thead><tr><th>Colour</th><th>Bearing</th><th>Distance</th><th>Confidence</th></tr></thead>
+      <tbody id="obs"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+const COLOURS = ["RED","GREEN","MAGENTA"];
+const CSSCOL  = {RED:"#EE2737", GREEN:"#44D62C", MAGENTA:"#FF00FF"};
+const CHAN    = ["H","S","V"], CHMAX = [179,255,255];
+let cfg = null, colour = "RED", view = "blobs", dirty = false;
+
+/* ---------- feed ---------- */
+function refreshFeed(){
+  document.getElementById("feed").src =
+    `/stream/${view}?colour=${colour}&t=${Date.now()}`;
+  document.getElementById("feedhint").textContent =
+    view === "mask"    ? `White pixels are what ${colour.toLowerCase()} currently matches.` :
+    view === "overlay" ? `Matched ${colour.toLowerCase()} pixels kept in colour, rest dimmed.` :
+    view === "blobs"   ? "Boxes are accepted blobs, labelled with computed bearing." :
+                         "Unprocessed camera frame.";
+}
+
+/* ---------- controls ---------- */
+function bandsHTML(){
+  const ranges = cfg.hsv[colour] || [];
+  return ranges.map((r,ri)=>`
+    <div class="band">
+      <div class="cap">${ranges.length>1?`Range ${ri+1} of ${ranges.length}`:"Threshold range"}</div>
+      ${CHAN.map((ch,ci)=>`
+        <div class="rng">
+          <label for="r${ri}l${ci}">${ch} lower <b class="num">${r[0][ci]}</b></label>
+          <input type="range" id="r${ri}l${ci}" data-r="${ri}" data-b="0" data-i="${ci}"
+                 min="0" max="${CHMAX[ci]}" value="${r[0][ci]}">
+        </div>
+        <div class="rng">
+          <label for="r${ri}u${ci}">${ch} upper <b class="num">${r[1][ci]}</b></label>
+          <input type="range" id="r${ri}u${ci}" data-r="${ri}" data-b="1" data-i="${ci}"
+                 min="0" max="${CHMAX[ci]}" value="${r[1][ci]}">
+        </div>`).join("")}
+    </div>`).join("");
+}
+
+function renderControls(){
+  document.getElementById("bands").innerHTML = bandsHTML();
+  document.querySelectorAll("#bands input[type=range]").forEach(s=>{
+    s.addEventListener("input", e=>{
+      const t=e.target, v=+t.value;
+      cfg.hsv[colour][+t.dataset.r][+t.dataset.b][+t.dataset.i] = v;
+      t.previousElementSibling.querySelector("b").textContent = v;
+      pushLive();
+    });
+  });
+  document.getElementById("hfov").value = cfg.hfov_deg;
+  document.getElementById("hfov-v").textContent = cfg.hfov_deg;
+  document.getElementById("area").value = cfg.min_blob_area;
+  document.getElementById("area-v").textContent = cfg.min_blob_area;
+  document.getElementById("swap").checked = !!cfg.swap_rb;
+}
+
+let pending=null;
+function pushLive(){
+  markDirty();
+  clearTimeout(pending);
+  pending = setTimeout(()=>{
+    fetch("/api/live",{method:"POST",headers:{"Content-Type":"application/json"},
+                       body:JSON.stringify(cfg)});
+  }, 60);                                   /* debounce slider drags */
+}
+function markDirty(){
+  dirty = true;
+  const b=document.getElementById("save");
+  b.disabled=false; b.textContent="Save to config.json";
+}
+
+/* ---------- radar ---------- */
+const cv = document.getElementById("radar"), ctx = cv.getContext("2d");
+function drawRadar(d){
+  const W=cv.width, H=cv.height, cx=W/2, cy=H/2, R=Math.min(W,H)/2-14;
+  const scale = R / (d.radar_max_mm || 3000);
+  ctx.clearRect(0,0,W,H);
+
+  ctx.strokeStyle="#E4E4DE"; ctx.lineWidth=1;
+  for(let mm=500; mm<=d.radar_max_mm; mm+=500){
+    ctx.beginPath(); ctx.arc(cx,cy,mm*scale,0,Math.PI*2); ctx.stroke();
+  }
+  ctx.beginPath(); ctx.moveTo(cx,cy-R); ctx.lineTo(cx,cy+R);
+  ctx.moveTo(cx-R,cy); ctx.lineTo(cx+R,cy); ctx.stroke();
+
+  /* forward marker, using the field's orange */
+  ctx.strokeStyle="#EF6C1A"; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(cx,cy-R); ctx.stroke();
+
+  /* lidar returns */
+  ctx.fillStyle="#2A3A63";
+  (d.ranges||[]).forEach((mm,deg)=>{
+    if(mm===null) return;
+    const rr=Math.min(mm,d.radar_max_mm)*scale, a=deg*Math.PI/180;
+    ctx.fillRect(cx-rr*Math.sin(a)-1, cy-rr*Math.cos(a)-1, 2,2);
+  });
+
+  /* robot */
+  ctx.fillStyle="#0D1B3E";
+  ctx.beginPath(); ctx.arc(cx,cy,4,0,Math.PI*2); ctx.fill();
+
+  /* fused obstacles */
+  (d.obstacles||[]).forEach(o=>{
+    const a=o.bearing_deg*Math.PI/180;
+    const mm=(o.distance_mm===null)? d.radar_max_mm : Math.min(o.distance_mm,d.radar_max_mm);
+    const rr=mm*scale, x=cx-rr*Math.sin(a), y=cy-rr*Math.cos(a);
+    ctx.fillStyle=CSSCOL[o.color]||"#888";
+    ctx.beginPath(); ctx.arc(x,y,7,0,Math.PI*2); ctx.fill();
+    if(o.distance_mm===null){                 /* no lidar range: hollow it */
+      ctx.fillStyle="#fff";
+      ctx.beginPath(); ctx.arc(x,y,3.5,0,Math.PI*2); ctx.fill();
+    }
+  });
+}
+
+function renderTable(d){
+  const tb=document.getElementById("obs");
+  document.getElementById("front").textContent =
+    d.front_mm===null? "—" : d.front_mm+" mm";
+  if(!d.obstacles.length){
+    tb.innerHTML='<tr><td colspan="4" class="empty">Nothing detected. '+
+                 'Point the camera at a pillar, or widen the ranges.</td></tr>';
+    return;
+  }
+  tb.innerHTML = d.obstacles.map(o=>`
+    <tr>
+      <td><span class="chip" style="background:${CSSCOL[o.color]||'#888'}"></span>${o.color}</td>
+      <td class="num">${o.bearing_deg>0?"+":""}${o.bearing_deg}°</td>
+      <td class="num">${o.distance_mm===null? "no return" : o.distance_mm+" mm"}</td>
+      <td class="num">${o.confidence}</td>
+    </tr>`).join("");
+}
+
+async function poll(){
+  try{
+    const d = await (await fetch("/api/worldstate")).json();
+    document.getElementById("d-cam").className   = "dot "+(d.camera_ok?"on":"off");
+    document.getElementById("d-lidar").className = "dot "+(d.lidar_ok?"on":"off");
+    drawRadar(d); renderTable(d);
+  }catch(e){ /* keep polling */ }
+  setTimeout(poll, 200);
+}
+
+/* ---------- wiring ---------- */
+document.querySelectorAll(".tabs button").forEach(b=>{
+  b.onclick=()=>{
+    document.querySelectorAll(".tabs button")
+      .forEach(x=>x.setAttribute("aria-pressed", x===b));
+    view=b.dataset.v; refreshFeed();
+  };
+});
+document.querySelectorAll(".sw").forEach(b=>{
+  b.onclick=()=>{
+    document.querySelectorAll(".sw")
+      .forEach(x=>x.setAttribute("aria-pressed", x===b));
+    colour=b.dataset.c; renderControls(); refreshFeed();
+  };
+});
+document.getElementById("hfov").addEventListener("input",e=>{
+  cfg.hfov_deg=+e.target.value;
+  document.getElementById("hfov-v").textContent=e.target.value; pushLive();
+});
+document.getElementById("area").addEventListener("input",e=>{
+  cfg.min_blob_area=+e.target.value;
+  document.getElementById("area-v").textContent=e.target.value; pushLive();
+});
+document.getElementById("swap").addEventListener("change",e=>{
+  cfg.swap_rb=e.target.checked; pushLive();
+});
+document.getElementById("save").onclick=async()=>{
+  const b=document.getElementById("save");
+  const r=await (await fetch("/api/save",{method:"POST"})).json();
+  if(r.ok){ dirty=false; b.disabled=true; b.textContent="Saved — restart main.py"; }
+  else    { b.textContent="Save failed: "+r.error; }
+};
+document.getElementById("revert").onclick=async()=>{
+  const r=await (await fetch("/api/config")).json();
+  cfg=r.saved; renderControls(); pushLive();
+};
+
+(async function init(){
+  const r = await (await fetch("/api/config")).json();
+  cfg = r.live;
+  renderControls(); refreshFeed(); poll();
+  document.getElementById("save").disabled = true;
+  document.getElementById("save").textContent = "Saved";
+})();
+</script>
+</body>
+</html>
