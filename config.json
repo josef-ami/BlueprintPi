@@ -13,5 +13,14 @@
     "MAGENTA": [
       [[140, 80, 80], [165, 255, 255]]
     ]
+  },
+  "lidar": {
+    "quality_floor": 10,
+    "min_neighbours": 2,
+    "neighbour_dist_mm": 150,
+    "cluster_gap_mm": 120,
+    "min_cluster_points": 3,
+    "max_range_mm": 3000,
+    "mount_offset_deg": 0
   }
 }

@@ -1,21 +1,17 @@
 """
-Standalone calibration dashboard.
+Standalone calibration dashboard — lidar-first architecture.
 
-Run this INSTEAD of main.py — one process at a time can hold the camera and
-the lidar. It opens both sensors itself, runs its own mini fusion loop using
-the SAME imported detection and fusion code the robot uses, and serves a web
-UI on port 8080.
+Run this INSTEAD of main.py (one process may hold the camera + lidar at a
+time). It opens both sensors, and on every poll re-runs the ROBOT'S OWN
+functions with the live slider values:
 
-    python dashboard.py        then browse to http://<pi-hostname>:8080
+  camera : detect_blobs -> blobs_to_detections     (colour + bearing)
+  lidar  : filter_points -> cluster_points          (discrete obstacles)
+  fuse   : stamp camera colour onto lidar obstacles
 
-Sliders preview live against the current frame; nothing is written to
-config.json until you press Save. camera.py reads config.json at startup, so
-restart main.py to pick up saved values.
-
-Two lidar views are exposed:
-  /api/lidar_raw    - the lidar's own 360-reading array, no camera involved
-  /api/worldstate   - camera + lidar fused into obstacle {color,bearing,dist}
-Both read the SAME LidarResult from shared state; raw is just unfused.
+Nothing here reimplements that logic — it imports it, so what you tune is
+exactly what the robot runs. Sliders preview live; Save writes config.json;
+restart main.py to apply.
 """
 
 import json
@@ -27,10 +23,11 @@ import cv2
 import numpy as np
 from flask import Flask, Response, jsonify, render_template, request
 
-from worldstate import SharedState
+from worldstate import SharedState, CameraResult, LidarResult
 import sensors.camera as camera
-from sensors.lidar import LidarThread, sector_min
-from main import fuse                      # reuse the robot's own fusion
+from sensors.lidar import (LidarThread, filter_points, cluster_points,
+                           sector_min)
+from main import fuse
 
 PORT = 8080
 JPEG_QUALITY = 70
@@ -38,26 +35,23 @@ RADAR_MAX_MM = 3000
 
 app = Flask(__name__)
 
-# ---- live (unsaved) tuning values, edited by the sliders -------------------
 _live_lock = threading.Lock()
-_live = camera.load_config()               # seed from the saved config
+_live = camera.load_config()          # full config: hsv, hfov, ..., lidar block
 
-# ---- latest raw frame, owned by the capture thread ------------------------
 _frame_lock = threading.Lock()
-_latest_frame = None                       # RGB ndarray or None
+_latest_frame = None
 
 shared = SharedState()
 lidar_thread = None
-lidar_ok = False
 
 
 def live_cfg():
     with _live_lock:
-        return json.loads(json.dumps(_live))   # deep copy, cheap at this size
+        return json.loads(json.dumps(_live))
 
 
 # --------------------------------------------------------------------------
-# capture thread — keeps the newest raw frame available to every stream
+# capture thread
 # --------------------------------------------------------------------------
 
 class CaptureThread(threading.Thread):
@@ -102,14 +96,13 @@ def get_frame():
 
 
 # --------------------------------------------------------------------------
-# view rendering — raw / mask / overlay / blobs
+# video views (unchanged — still needed for HSV tuning)
 # --------------------------------------------------------------------------
 
 BOX_BGR = {"RED": (55, 39, 238), "GREEN": (44, 214, 68), "MAGENTA": (255, 0, 255)}
 
 
 def render(view, colour):
-    """Return a BGR image for the requested view, or None if no frame yet."""
     frame = get_frame()
     if frame is None:
         return None
@@ -135,7 +128,7 @@ def render(view, colour):
         return np.where(mask[:, :, None] > 0,
                         cv2.addWeighted(bgr, 0.6, keep, 0.4, 0), dim)
 
-    # blobs: every colour boxed, with its computed bearing
+    # blobs: colour detections with their bearing (no distance in this model)
     bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
     blobs = camera.detect_blobs(frame, hsv_cfg, cfg["min_blob_area"])
     for b in blobs:
@@ -187,17 +180,14 @@ def get_config():
 
 @app.route("/api/live", methods=["POST"])
 def set_live():
-    """Update the in-memory tuning values the streams use. Not persisted."""
     global _live
-    incoming = request.get_json(force=True)
     with _live_lock:
-        _live = incoming
+        _live = request.get_json(force=True)
     return jsonify({"ok": True})
 
 
 @app.route("/api/save", methods=["POST"])
 def save():
-    """Persist current live values to config.json."""
     cfg = live_cfg()
     try:
         camera.save_config(cfg)
@@ -208,55 +198,66 @@ def save():
 
 @app.route("/api/lidar_raw")
 def lidar_raw():
-    """
-    The lidar's own view of the world, with NO camera fusion applied.
-    This is LidarResult exactly as the lidar thread published it — useful
-    for judging sensor health independent of any camera/HSV tuning.
-    """
+    """Raw ranges + quality — sensor-health view, no filtering, no camera."""
     _, lidar_result = shared.snapshot()
     if lidar_result is None:
-        return jsonify({"ok": False, "ranges": [], "stats": None})
-
+        return jsonify({"ok": False, "ranges": [], "qualities": [], "stats": None})
     ranges = lidar_result.ranges
+    quals = getattr(lidar_result, "qualities", [0] * 360)
     valid = [d for d in ranges if not math.isinf(d)]
-    stats = {
-        "valid_count": len(valid),
-        "total": len(ranges),
-        "min_mm": round(min(valid)) if valid else None,
-        "max_mm": round(max(valid)) if valid else None,
-        "age_s": round(time.time() - lidar_result.timestamp, 2),
-    }
     return jsonify({
         "ok": True,
         "ranges": [None if math.isinf(d) else round(d) for d in ranges],
-        "stats": stats,
+        "qualities": list(quals),
+        "stats": {
+            "valid_count": len(valid),
+            "total": len(ranges),
+            "min_mm": round(min(valid)) if valid else None,
+            "max_mm": round(max(valid)) if valid else None,
+            "age_s": round(time.time() - lidar_result.timestamp, 2),
+        },
         "radar_max_mm": RADAR_MAX_MM,
     })
 
 
 @app.route("/api/worldstate")
 def worldstate():
-    """Run the robot's own fusion on the current frame + latest lidar scan."""
+    """
+    The live fused view. Re-runs the robot's filter -> cluster -> fuse chain
+    with the CURRENT slider values, so tuning previews exactly what the robot
+    would compute.
+    """
     cfg = live_cfg()
+    lidar_cfg = cfg.get("lidar", {})
+
+    # --- camera: colour detections with live HSV / HFOV ---
     frame = get_frame()
     cam_result = None
+    detections = []
     if frame is not None:
         blobs = camera.detect_blobs(frame, cfg["hsv"], cfg["min_blob_area"])
-        obstacles = camera.blobs_to_obstacles(blobs, camera.FRAME_W,
-                                              cfg["hfov_deg"])
-        from worldstate import CameraResult
-        cam_result = CameraResult(timestamp=time.time(), obstacles=obstacles)
-        shared.set_camera(cam_result)
+        detections = camera.blobs_to_detections(blobs, camera.FRAME_W,
+                                                cfg["hfov_deg"])
+        cam_result = CameraResult(timestamp=time.time(), detections=detections)
 
+    # --- lidar: re-filter + re-cluster the raw scan with live values ---
     _, lidar_result = shared.snapshot()
-    fused = fuse(cam_result, lidar_result)      # the robot's own fuse()
-
-    ranges = []
-    front = None
+    ranges_out, survivors_out, front = [], [], None
+    obstacles = []
     if lidar_result is not None:
-        ranges = [None if math.isinf(d) else round(d)
-                  for d in lidar_result.ranges]
-        f = sector_min(lidar_result.ranges, 0, 15)
+        ranges = lidar_result.ranges
+        quals = getattr(lidar_result, "qualities", [0] * 360)
+        survivors = filter_points(ranges, quals, lidar_cfg)   # real fn, live cfg
+        obstacles = cluster_points(survivors, lidar_cfg)       # real fn, live cfg
+
+        # fuse: colour the freshly-clustered obstacles
+        live_lr = LidarResult(timestamp=time.time(), ranges=ranges,
+                              qualities=list(quals), obstacles=obstacles)
+        obstacles = fuse(cam_result, live_lr)
+
+        ranges_out = [None if math.isinf(d) else round(d) for d in ranges]
+        survivors_out = [[p[0], round(p[1])] for p in survivors]  # [deg, mm]
+        f = sector_min(ranges, 0, 15)
         front = None if math.isinf(f) else round(f)
 
     return jsonify({
@@ -264,14 +265,19 @@ def worldstate():
         "camera_error": capture.error,
         "lidar_ok": lidar_result is not None,
         "front_mm": front,
-        "ranges": ranges,
+        "ranges": ranges_out,
+        "survivors": survivors_out,
         "obstacles": [
             {"color": o.color,
              "bearing_deg": round(o.bearing_deg, 1),
-             "distance_mm": (None if math.isinf(o.distance_mm)
-                             else round(o.distance_mm)),
-             "confidence": round(o.confidence, 2)}
-            for o in fused
+             "distance_mm": round(o.distance_mm),
+             "width_deg": round(o.width_deg, 1),
+             "point_count": o.point_count}
+            for o in obstacles
+        ],
+        "detections": [
+            {"color": d.color, "bearing_deg": round(d.bearing_deg, 1)}
+            for d in detections
         ],
         "radar_max_mm": RADAR_MAX_MM,
     })
@@ -280,14 +286,13 @@ def worldstate():
 # --------------------------------------------------------------------------
 
 def main():
-    global lidar_thread, lidar_ok
+    global lidar_thread
     capture.start()
     try:
         lidar_thread = LidarThread(shared)
         lidar_thread.start()
-        lidar_ok = True
     except Exception as e:
-        print(f"[dashboard] lidar unavailable, HSV tuning still works: {e}")
+        print(f"[dashboard] lidar unavailable, camera tuning still works: {e}")
 
     print(f"Dashboard on http://0.0.0.0:{PORT}  (stop main.py first)")
     try:
