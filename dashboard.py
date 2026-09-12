@@ -96,6 +96,50 @@ def get_frame():
 
 
 # --------------------------------------------------------------------------
+# diagnostic distributions for the two threshold graphs
+# (diagnostic-only: lives here, not in the robot's lidar.py)
+# --------------------------------------------------------------------------
+
+HIST_BIN_MM = 20
+HIST_N_BINS = 25          # 0..500 mm, matching the slider ranges
+
+
+def _histogram(values, bin_mm=HIST_BIN_MM, n_bins=HIST_N_BINS):
+    counts = [0] * n_bins
+    for v in values:
+        b = int(v // bin_mm)
+        b = 0 if b < 0 else (n_bins - 1 if b >= n_bins else b)
+        counts[b] += 1
+    return counts
+
+
+def _nearest_neighbour_dists(points):
+    """For each point, distance to its closest other point (mm). O(n^2), n<=360."""
+    out = []
+    for i, p in enumerate(points):
+        best = float("inf")
+        for j, o in enumerate(points):
+            if i == j:
+                continue
+            dd = math.hypot(p[3] - o[3], p[4] - o[4])
+            if dd < best:
+                best = dd
+        if not math.isinf(best):
+            out.append(best)
+    return out
+
+
+def _consecutive_gaps(points):
+    """Gaps (mm) between angularly-adjacent points — what clustering walks."""
+    if len(points) < 2:
+        return []
+    pts = sorted(points, key=lambda p: p[0])
+    gaps = [math.hypot(a[3] - b[3], a[4] - b[4]) for a, b in zip(pts, pts[1:])]
+    gaps.append(math.hypot(pts[0][3] - pts[-1][3], pts[0][4] - pts[-1][4]))  # wrap
+    return gaps
+
+
+# --------------------------------------------------------------------------
 # video views (unchanged — still needed for HSV tuning)
 # --------------------------------------------------------------------------
 
@@ -244,21 +288,40 @@ def worldstate():
     _, lidar_result = shared.snapshot()
     ranges_out, survivors_out, front = [], [], None
     obstacles = []
+    neighbor_hist = gap_hist = None
     if lidar_result is not None:
         ranges = lidar_result.ranges
         quals = getattr(lidar_result, "qualities", [0] * 360)
+
+        # quality-passed points = isolation disabled; this is the SET the
+        # isolation filter examines, so nearest-neighbour distances computed
+        # on it tell you where to put neighbour_dist_mm.
+        q_cfg = dict(lidar_cfg); q_cfg["min_neighbours"] = 0
+        quality_passed = filter_points(ranges, quals, q_cfg)
+
         survivors = filter_points(ranges, quals, lidar_cfg)   # real fn, live cfg
         obstacles = cluster_points(survivors, lidar_cfg)       # real fn, live cfg
 
-        # fuse: colour the freshly-clustered obstacles
         live_lr = LidarResult(timestamp=time.time(), ranges=ranges,
                               qualities=list(quals), obstacles=obstacles)
         obstacles = fuse(cam_result, live_lr)
 
         ranges_out = [None if math.isinf(d) else round(d) for d in ranges]
-        survivors_out = [[p[0], round(p[1])] for p in survivors]  # [deg, mm]
+        survivors_out = [[p[0], round(p[1]), p[2]] for p in survivors]  # deg,mm,q
         f = sector_min(ranges, 0, 15)
         front = None if math.isinf(f) else round(f)
+
+        # distributions for the two tuning graphs
+        neighbor_hist = {
+            "counts": _histogram(_nearest_neighbour_dists(quality_passed)),
+            "bin_mm": HIST_BIN_MM, "max_mm": HIST_BIN_MM * HIST_N_BINS,
+            "threshold": lidar_cfg.get("neighbour_dist_mm", 150),
+        }
+        gap_hist = {
+            "counts": _histogram(_consecutive_gaps(survivors)),
+            "bin_mm": HIST_BIN_MM, "max_mm": HIST_BIN_MM * HIST_N_BINS,
+            "threshold": lidar_cfg.get("cluster_gap_mm", 120),
+        }
 
     return jsonify({
         "camera_ok": frame is not None,
@@ -279,6 +342,8 @@ def worldstate():
             {"color": d.color, "bearing_deg": round(d.bearing_deg, 1)}
             for d in detections
         ],
+        "neighbor_hist": neighbor_hist,
+        "gap_hist": gap_hist,
         "radar_max_mm": RADAR_MAX_MM,
     })
 
