@@ -60,6 +60,7 @@
   input[type=range]{width:100%;accent-color:var(--blue);margin:0}
   .band{border-left:3px solid var(--blue);padding-left:12px;margin-bottom:16px}
   .band .cap{font-size:12px;color:var(--muted);margin-bottom:8px}
+  .lidar-band{border-left:3px solid var(--orange);padding-left:12px}
   .switch{display:flex;align-items:center;gap:8px;font-size:14px}
   .row{display:flex;gap:10px;align-items:center;justify-content:space-between}
 
@@ -123,6 +124,11 @@
     </section>
 
     <section>
+      <h2>Distance selection (fusion)</h2>
+      <div class="lidar-band" id="fusionBands"></div>
+    </section>
+
+    <section>
       <div class="row">
         <button id="revert">Revert to saved</button>
         <span class="hint" style="margin:0">Save, then restart main.py to apply.</span>
@@ -156,6 +162,11 @@
 <script>
 const CSSCOL={RED:"#EE2737",GREEN:"#44D62C",MAGENTA:"#FF00FF",UNKNOWN:"#8A8F99"};
 const CHAN=["H","S","V"],CHMAX=[179,255,255];
+const FUSION_PARAMS={
+  bearing_match_deg:["Bearing window (± °)",0,30,1],
+  range_floor_mm:["Range floor (mm)",0,600,10],
+  gap_split_mm:["Pillar/wall gap split (mm)",0,800,10],
+};
 let cfg=null,colour="RED",view="blobs";
 
 /* ---------- feed ---------- */
@@ -181,6 +192,12 @@ function bandsHTML(){
           <input type="range" data-r="${ri}" data-b="1" data-i="${ci}" min="0" max="${CHMAX[ci]}" value="${r[1][ci]}"></div>`).join("")}
     </div>`).join("");
 }
+function fusionBandsHTML(){
+  const F=cfg.fusion||{};
+  return Object.entries(FUSION_PARAMS).map(([k,[lbl,mn,mx,st]])=>`
+    <div class="rng"><label>${lbl} <b class="num" id="fp-${k}">${F[k]??mn}</b></label>
+      <input type="range" data-fk="${k}" min="${mn}" max="${mx}" step="${st}" value="${F[k]??mn}"></div>`).join("");
+}
 function renderControls(){
   document.getElementById("bands").innerHTML=bandsHTML();
   document.querySelectorAll("#bands input[type=range]").forEach(s=>{
@@ -188,6 +205,15 @@ function renderControls(){
       const t=e.target;
       cfg.hsv[colour][+t.dataset.r][+t.dataset.b][+t.dataset.i]=+t.value;
       t.previousElementSibling.querySelector("b").textContent=t.value; pushLive();
+    });
+  });
+  document.getElementById("fusionBands").innerHTML=fusionBandsHTML();
+  document.querySelectorAll("#fusionBands input[type=range]").forEach(s=>{
+    s.addEventListener("input",e=>{
+      const t=e.target,k=t.dataset.fk;
+      if(!cfg.fusion)cfg.fusion={};
+      cfg.fusion[k]=+t.value;
+      document.getElementById("fp-"+k).textContent=t.value; pushLive();
     });
   });
   document.getElementById("hfov").value=cfg.hfov_deg;
@@ -293,6 +319,7 @@ document.getElementById("revert").onclick=async()=>{const r=await(await fetch("/
 (async function init(){
   const r=await(await fetch("/api/config")).json();
   cfg=r.live;
+  if(!cfg.fusion)cfg.fusion={};
   renderControls();refreshFeed();poll();pollRaw();
   document.getElementById("save").disabled=true;
   document.getElementById("save").textContent="Saved";

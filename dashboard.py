@@ -24,7 +24,7 @@ from flask import Flask, Response, jsonify, render_template, request
 
 from worldstate import SharedState, CameraResult
 import sensors.camera as camera
-from sensors.lidar import LidarThread, sector_min
+from sensors.lidar import LidarThread, sector_min, select_range
 from main import fuse
 
 PORT = 8080
@@ -222,26 +222,34 @@ def lidar_raw():
 def worldstate():
     """
     Live fused view: detect camera obstacles with current HSV/HFOV, then
-    attach a lidar distance to each by bearing — the robot's own fuse().
+    attach a lidar distance to each with the robot's select_range — called
+    directly here (not via fuse) so the live fusion sliders preview. The
+    selection logic is identical to what the robot runs; only the parameter
+    source differs (live config vs. import-time config).
     """
     cfg = live_cfg()
+    fcfg = cfg.get("fusion", {})
+    match_deg = fcfg.get("bearing_match_deg", 8)
+    floor_mm = fcfg.get("range_floor_mm", 0.0)
+    gap_mm = fcfg.get("gap_split_mm", 0.0)
 
     frame = get_frame()
-    cam_result = None
+    obstacles = []
     if frame is not None:
         blobs = camera.detect_blobs(frame, cfg["hsv"], cfg["min_blob_area"])
         obstacles = camera.blobs_to_obstacles(blobs, camera.FRAME_W,
                                               cfg["hfov_deg"])
-        cam_result = CameraResult(timestamp=time.time(), obstacles=obstacles)
 
     _, lidar_result = shared.snapshot()
-    fused = fuse(cam_result, lidar_result)
-
     ranges_out, front = [], None
     if lidar_result is not None:
-        ranges_out = [None if math.isinf(d) else round(d)
-                      for d in lidar_result.ranges]
-        f = sector_min(lidar_result.ranges, 0, 15)
+        ranges = lidar_result.ranges
+        for obs in obstacles:                       # live-parameter selection
+            center = int(round(obs.bearing_deg)) % 360
+            obs.distance_mm = select_range(ranges, center, match_deg,
+                                           floor_mm=floor_mm, gap_split_mm=gap_mm)
+        ranges_out = [None if math.isinf(d) else round(d) for d in ranges]
+        f = sector_min(ranges, 0, 15)
         front = None if math.isinf(f) else round(f)
 
     return jsonify({
@@ -256,7 +264,7 @@ def worldstate():
              "distance_mm": (None if math.isinf(o.distance_mm)
                              else round(o.distance_mm)),
              "confidence": round(o.confidence, 2)}
-            for o in fused
+            for o in obstacles
         ],
         "radar_max_mm": RADAR_MAX_MM,
     })
