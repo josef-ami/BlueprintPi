@@ -96,7 +96,9 @@
 
   .bottom{display:grid;grid-template-columns:auto minmax(0,1fr);gap:20px;
           padding:18px 20px}
-  #radar{border:1px solid var(--navy);background:#fff;display:block}
+  .bottom-3{grid-template-columns:auto auto minmax(0,1fr)}
+  #radar,#radarRaw{border:1px solid var(--navy);background:#fff;display:block}
+  @media (max-width:1200px){.bottom-3{grid-template-columns:1fr}}
   table{border-collapse:collapse;width:100%;font-size:14px}
   th,td{text-align:left;padding:5px 10px 5px 0;border-bottom:1px solid var(--rule)}
   th{color:var(--muted);font-weight:600;font-size:12px}
@@ -166,11 +168,16 @@
   </div>
 </main>
 
-<div class="bottom">
+<div class="bottom bottom-3">
   <div>
-    <h2 style="font-size:13px;color:var(--muted);margin:0 0 12px">World state</h2>
-    <canvas id="radar" width="380" height="380"></canvas>
-    <p class="hint">Robot at centre, forward is up. Ring spacing 500&nbsp;mm.</p>
+    <h2 style="font-size:13px;color:var(--muted);margin:0 0 12px">Raw lidar</h2>
+    <canvas id="radarRaw" width="340" height="340"></canvas>
+    <p class="hint" id="lidarstats">—</p>
+  </div>
+  <div>
+    <h2 style="font-size:13px;color:var(--muted);margin:0 0 12px">Fused world state</h2>
+    <canvas id="radar" width="340" height="340"></canvas>
+    <p class="hint">Robot at centre, forward is up. Ring spacing 500&nbsp;mm. Hollow = camera-only, no lidar match.</p>
   </div>
   <div>
     <h2 style="font-size:13px;color:var(--muted);margin:0 0 12px">
@@ -252,41 +259,78 @@ function markDirty(){
   b.disabled=false; b.textContent="Save to config.json";
 }
 
-/* ---------- radar ---------- */
-const cv = document.getElementById("radar"), ctx = cv.getContext("2d");
-function drawRadar(d){
-  const W=cv.width, H=cv.height, cx=W/2, cy=H/2, R=Math.min(W,H)/2-14;
-  const scale = R / (d.radar_max_mm || 3000);
+/* ---------- radar scaffold, shared by both panels ---------- */
+function drawScaffold(ctx,W,H,maxMm){
+  const cx=W/2, cy=H/2, R=Math.min(W,H)/2-14;
+  const scale = R / (maxMm||3000);
   ctx.clearRect(0,0,W,H);
-
   ctx.strokeStyle="#E4E4DE"; ctx.lineWidth=1;
-  for(let mm=500; mm<=d.radar_max_mm; mm+=500){
+  for(let mm=500; mm<=maxMm; mm+=500){
     ctx.beginPath(); ctx.arc(cx,cy,mm*scale,0,Math.PI*2); ctx.stroke();
   }
   ctx.beginPath(); ctx.moveTo(cx,cy-R); ctx.lineTo(cx,cy+R);
   ctx.moveTo(cx-R,cy); ctx.lineTo(cx+R,cy); ctx.stroke();
-
-  /* forward marker, using the field's orange */
-  ctx.strokeStyle="#EF6C1A"; ctx.lineWidth=2;
+  ctx.strokeStyle="#EF6C1A"; ctx.lineWidth=2;      /* forward marker */
   ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(cx,cy-R); ctx.stroke();
+  return {cx,cy,R,scale};
+}
+function polar(g,a,mm){                            /* a in rad, robot-centric */
+  return [g.cx - mm*g.scale*Math.sin(a), g.cy - mm*g.scale*Math.cos(a)];
+}
 
-  /* lidar returns */
+/* ---------- raw lidar panel: every one of the 360 readings ---------- */
+const cvRaw = document.getElementById("radarRaw"), ctxRaw = cvRaw.getContext("2d");
+function drawRadarRaw(d){
+  const g = drawScaffold(ctxRaw, cvRaw.width, cvRaw.height, d.radar_max_mm||3000);
+  (d.ranges||[]).forEach((mm,deg)=>{
+    if(mm===null) return;                          /* no return at this angle */
+    const a = deg*Math.PI/180;
+    const [x,y] = polar(g, a, Math.min(mm, d.radar_max_mm));
+    /* nearer returns drawn darker so close obstacles read as denser */
+    const t = Math.min(1, mm/(d.radar_max_mm||3000));
+    ctxRaw.fillStyle = `rgb(${13+t*180},${27+t*180},${62+t*180})`;
+    ctxRaw.fillRect(x-1.5, y-1.5, 3, 3);
+  });
+  ctxRaw.fillStyle="#0D1B3E";
+  ctxRaw.beginPath(); ctxRaw.arc(g.cx,g.cy,4,0,Math.PI*2); ctxRaw.fill();
+}
+
+async function pollRaw(){
+  try{
+    const d = await (await fetch("/api/lidar_raw")).json();
+    const s = document.getElementById("lidarstats");
+    if(!d.ok || !d.stats){
+      s.textContent = "No lidar data yet — check /dev/ttyUSB0 and dialout group.";
+    }else{
+      s.textContent = `${d.stats.valid_count}/${d.stats.total} angles returning · `+
+        `${d.stats.min_mm}–${d.stats.max_mm} mm · updated ${d.stats.age_s}s ago`;
+      drawRadarRaw(d);
+    }
+  }catch(e){ /* keep polling */ }
+  setTimeout(pollRaw, 200);
+}
+
+/* ---------- fused world-state panel ---------- */
+const cv = document.getElementById("radar"), ctx = cv.getContext("2d");
+function drawRadar(d){
+  const g = drawScaffold(ctx, cv.width, cv.height, d.radar_max_mm||3000);
+
+  /* lidar returns, dim, as context behind the fused obstacles */
   ctx.fillStyle="#2A3A63";
   (d.ranges||[]).forEach((mm,deg)=>{
     if(mm===null) return;
-    const rr=Math.min(mm,d.radar_max_mm)*scale, a=deg*Math.PI/180;
-    ctx.fillRect(cx-rr*Math.sin(a)-1, cy-rr*Math.cos(a)-1, 2,2);
+    const a=deg*Math.PI/180;
+    const [x,y]=polar(g,a,Math.min(mm,d.radar_max_mm));
+    ctx.fillRect(x-1,y-1,2,2);
   });
 
-  /* robot */
   ctx.fillStyle="#0D1B3E";
-  ctx.beginPath(); ctx.arc(cx,cy,4,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(g.cx,g.cy,4,0,Math.PI*2); ctx.fill();
 
-  /* fused obstacles */
   (d.obstacles||[]).forEach(o=>{
     const a=o.bearing_deg*Math.PI/180;
     const mm=(o.distance_mm===null)? d.radar_max_mm : Math.min(o.distance_mm,d.radar_max_mm);
-    const rr=mm*scale, x=cx-rr*Math.sin(a), y=cy-rr*Math.cos(a);
+    const [x,y]=polar(g,a,mm);
     ctx.fillStyle=CSSCOL[o.color]||"#888";
     ctx.beginPath(); ctx.arc(x,y,7,0,Math.PI*2); ctx.fill();
     if(o.distance_mm===null){                 /* no lidar range: hollow it */
@@ -364,7 +408,7 @@ document.getElementById("revert").onclick=async()=>{
 (async function init(){
   const r = await (await fetch("/api/config")).json();
   cfg = r.live;
-  renderControls(); refreshFeed(); poll();
+  renderControls(); refreshFeed(); poll(); pollRaw();
   document.getElementById("save").disabled = true;
   document.getElementById("save").textContent = "Saved";
 })();

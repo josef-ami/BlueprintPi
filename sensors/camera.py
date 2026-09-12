@@ -119,7 +119,7 @@ def open_camera(width=FRAME_W, height=FRAME_H):
     return cam
 
 
-def grab_rgb(cam, swap_rb=False):
+def grab_rgb(cam, swap_rb=True):
     """
     One frame as RGB. Picamera2's 'RGB888' channel order varies by version,
     so swap_rb is a config toggle — flip it if red and blue look swapped.
