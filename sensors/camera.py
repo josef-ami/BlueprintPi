@@ -1,16 +1,16 @@
 """
-Camera adapter — COLOUR ONLY.
+Camera adapter — camera-first: detects colour AND bearing.
 
-In the lidar-first architecture the camera no longer produces obstacles or
-geometry. Its single job: report which colours are visible and at what
-bearing, so fusion can stamp a colour onto the obstacles the LIDAR detected.
+px_to_bearing now uses the pinhole-camera (atan) model instead of a linear
+approximation, so bearings stay accurate toward the edges of the frame, not
+just near the centre.
 
-detect_blobs / build_mask stay module-level and unchanged because the
-calibration dashboard still uses them to visualise masks. What changed is the
-thread's OUTPUT: ColorDetection (colour + bearing), never distance.
+Distance is left as inf here; fusion fills it from the lidar range at the
+obstacle's bearing.
 """
 
 import json
+import math
 import os
 import threading
 import time
@@ -18,9 +18,7 @@ import time
 import cv2
 import numpy as np
 
-import math
-
-from worldstate import SharedState, CameraResult, ColorDetection
+from worldstate import SharedState, CameraResult, Obstacle
 
 FRAME_W = 640
 FRAME_H = 480
@@ -47,20 +45,26 @@ def save_config(cfg, path=CONFIG_PATH):
 
 
 # --------------------------------------------------------------------------
-# detection helpers — shared with the dashboard
+# detection — shared with the dashboard
 # --------------------------------------------------------------------------
 
 def px_to_bearing(cx, frame_w, hfov_deg):
-    """Blob centre-x -> bearing in degrees. + = left of forward.
-    Uses a pinhole/tangent model rather than linear interpolation,
-    so it stays accurate toward the edges of the frame."""
-    half_w = frame_w / 2.0
-    hfov_rad = math.radians(hfov_deg)
-    f_x = half_w / math.tan(hfov_rad / 2.0)
+    """
+    Pixel column -> bearing in degrees, + = left of forward.
 
-    pixel_offset = cx - half_w
-    bearing_rad = math.atan(pixel_offset / f_x)
-    return -math.degrees(bearing_rad)
+    Pinhole model: a rectilinear lens projects an angle theta to a pixel
+    offset via  offset = f_px * tan(theta), so the inverse is an atan.
+
+        f_px = (frame_w / 2) / tan(hfov / 2)      # focal length in pixels
+        bearing = -atan( (cx - frame_w/2) / f_px )
+
+    The linear version (offset proportional to angle) is only correct at the
+    centre and at the exact edges; atan is correct across the whole frame,
+    which matters most for obstacles seen off to the side.
+    """
+    f_px = (frame_w / 2.0) / math.tan(math.radians(hfov_deg) / 2.0)
+    dx = cx - frame_w / 2.0
+    return -math.degrees(math.atan(dx / f_px))
 
 
 def build_mask(hsv_img, ranges):
@@ -95,12 +99,13 @@ def detect_blobs(frame_rgb, hsv_cfg, min_area):
     return blobs
 
 
-def blobs_to_detections(blobs, frame_w, hfov_deg):
-    """Colour + bearing only — no distance, no obstacle semantics."""
+def blobs_to_obstacles(blobs, frame_w, hfov_deg):
+    """Colour + bearing (atan). Distance left inf for fusion to fill."""
     return [
-        ColorDetection(
+        Obstacle(
             color=b["colour"],
             bearing_deg=px_to_bearing(b["cx"], frame_w, hfov_deg),
+            distance_mm=float("inf"),
             confidence=min(1.0, b["area"] / 5000.0),
         )
         for b in blobs
@@ -146,10 +151,10 @@ class CameraThread(threading.Thread):
             while not self._stop.is_set():
                 frame = grab_rgb(self._cam, self.swap_rb)
                 blobs = detect_blobs(frame, self.hsv_cfg, self.min_area)
-                detections = blobs_to_detections(blobs, FRAME_W, self.hfov_deg)
+                obstacles = blobs_to_obstacles(blobs, FRAME_W, self.hfov_deg)
                 self.shared.set_camera(
                     CameraResult(timestamp=time.time(),
-                                 detections=detections, ok=True))
+                                 obstacles=obstacles, ok=True))
                 time.sleep(PUBLISH_PERIOD)
         except Exception as e:
             print(f"[CameraThread] fatal: {type(e).__name__}: {e}")

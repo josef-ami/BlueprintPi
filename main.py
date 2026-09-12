@@ -1,13 +1,13 @@
 """
-Main entry point — lidar-first architecture.
+Main entry point — camera-first architecture.
 
-The LIDAR detects discrete obstacles (bearing + distance + size) from its
-filtered, clustered point cloud. The CAMERA reports only colours-at-bearings.
-Fusion stamps a colour onto each lidar obstacle by matching bearings.
+Camera detects obstacles (colour + bearing via the atan pinhole model).
+Lidar supplies a 360-degree range array. Fusion attaches a distance to each
+camera obstacle by reading the lidar range at that obstacle's bearing.
 
 Two producer threads write to SharedState; this loop reads snapshot(), fuses,
 and (eventually) drives the FSM + MCU. For now it prints so you can watch the
-coloured obstacle list track reality before the MCU exists.
+obstacle list track reality before the MCU exists.
 """
 
 import time
@@ -18,33 +18,23 @@ from sensors.camera import CameraThread
 from sensors.lidar import LidarThread, sector_min
 
 LOOP_HZ = 30
-BEARING_MATCH_DEG = 10   # camera colour must fall within this of a lidar obstacle
+BEARING_MATCH_DEG = 8   # lidar sector half-width searched around a bearing
 
 
 def fuse(camera_result, lidar_result):
     """
-    Colour the lidar-detected obstacles.
-
-    For each LidarObstacle, find the camera ColorDetection whose bearing is
-    closest (within BEARING_MATCH_DEG) and adopt its colour. Obstacles with no
-    colour match stay UNKNOWN — a real object the camera couldn't classify
-    (out of frame, mis-tuned HSV, or a wall segment rather than a pillar).
-    Returns the list of coloured LidarObstacles.
+    Attach a distance to each camera obstacle from the lidar range at its
+    bearing. Obstacle keeps distance=inf if the lidar has no return there.
     """
-    if lidar_result is None:
+    if camera_result is None:
         return []
-    obstacles = lidar_result.obstacles
-    detections = camera_result.detections if camera_result is not None else []
-
+    obstacles = camera_result.obstacles
+    if lidar_result is None:
+        return obstacles
+    ranges = lidar_result.ranges
     for obs in obstacles:
-        best = None
-        best_err = BEARING_MATCH_DEG
-        for det in detections:
-            err = abs(det.bearing_deg - obs.bearing_deg)
-            if err < best_err:
-                best_err = err
-                best = det
-        obs.color = best.color if best is not None else "UNKNOWN"
+        center = int(round(obs.bearing_deg)) % 360
+        obs.distance_mm = sector_min(ranges, center, BEARING_MATCH_DEG)
     return obstacles
 
 
@@ -75,7 +65,6 @@ def main():
                      if lidar_result else float("inf"))
             summary = ", ".join(
                 f"{o.color}@{o.bearing_deg:+.0f}deg/{o.distance_mm:.0f}mm"
-                f"(w{o.width_deg:.0f} n{o.point_count})"
                 for o in obstacles
             ) or "no obstacles"
             print(f"front={front:7.0f}mm | {summary}")
