@@ -18,6 +18,8 @@ import time
 import cv2
 import numpy as np
 
+import math
+
 from worldstate import SharedState, CameraResult, ColorDetection
 
 FRAME_W = 640
@@ -49,9 +51,16 @@ def save_config(cfg, path=CONFIG_PATH):
 # --------------------------------------------------------------------------
 
 def px_to_bearing(cx, frame_w, hfov_deg):
-    """Blob centre-x -> bearing in degrees. + = left of forward."""
-    norm = (cx - frame_w / 2.0) / (frame_w / 2.0)
-    return -norm * (hfov_deg / 2.0)
+    """Blob centre-x -> bearing in degrees. + = left of forward.
+    Uses a pinhole/tangent model rather than linear interpolation,
+    so it stays accurate toward the edges of the frame."""
+    half_w = frame_w / 2.0
+    hfov_rad = math.radians(hfov_deg)
+    f_x = half_w / math.tan(hfov_rad / 2.0)
+
+    pixel_offset = cx - half_w
+    bearing_rad = math.atan(pixel_offset / f_x)
+    return -math.degrees(bearing_rad)
 
 
 def build_mask(hsv_img, ranges):
