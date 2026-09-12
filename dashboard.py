@@ -1,13 +1,12 @@
 """
-Standalone calibration dashboard — lidar-first architecture.
+Standalone calibration dashboard — camera-first architecture.
 
 Run this INSTEAD of main.py (one process may hold the camera + lidar at a
-time). It opens both sensors, and on every poll re-runs the ROBOT'S OWN
-functions with the live slider values:
+time). On every poll it re-runs the ROBOT'S OWN functions with the live
+slider values:
 
-  camera : detect_blobs -> blobs_to_detections     (colour + bearing)
-  lidar  : filter_points -> cluster_points          (discrete obstacles)
-  fuse   : stamp camera colour onto lidar obstacles
+  camera : detect_blobs -> blobs_to_obstacles   (colour + bearing via atan)
+  fuse   : attach a lidar distance to each camera obstacle by bearing
 
 Nothing here reimplements that logic — it imports it, so what you tune is
 exactly what the robot runs. Sliders preview live; Save writes config.json;
@@ -23,10 +22,9 @@ import cv2
 import numpy as np
 from flask import Flask, Response, jsonify, render_template, request
 
-from worldstate import SharedState, CameraResult, LidarResult
+from worldstate import SharedState, CameraResult
 import sensors.camera as camera
-from sensors.lidar import (LidarThread, filter_points, cluster_points,
-                           sector_min)
+from sensors.lidar import LidarThread, sector_min
 from main import fuse
 
 PORT = 8080
@@ -36,7 +34,7 @@ RADAR_MAX_MM = 3000
 app = Flask(__name__)
 
 _live_lock = threading.Lock()
-_live = camera.load_config()          # full config: hsv, hfov, ..., lidar block
+_live = camera.load_config()
 
 _frame_lock = threading.Lock()
 _latest_frame = None
@@ -96,51 +94,7 @@ def get_frame():
 
 
 # --------------------------------------------------------------------------
-# diagnostic distributions for the two threshold graphs
-# (diagnostic-only: lives here, not in the robot's lidar.py)
-# --------------------------------------------------------------------------
-
-HIST_BIN_MM = 20
-HIST_N_BINS = 25          # 0..500 mm, matching the slider ranges
-
-
-def _histogram(values, bin_mm=HIST_BIN_MM, n_bins=HIST_N_BINS):
-    counts = [0] * n_bins
-    for v in values:
-        b = int(v // bin_mm)
-        b = 0 if b < 0 else (n_bins - 1 if b >= n_bins else b)
-        counts[b] += 1
-    return counts
-
-
-def _nearest_neighbour_dists(points):
-    """For each point, distance to its closest other point (mm). O(n^2), n<=360."""
-    out = []
-    for i, p in enumerate(points):
-        best = float("inf")
-        for j, o in enumerate(points):
-            if i == j:
-                continue
-            dd = math.hypot(p[3] - o[3], p[4] - o[4])
-            if dd < best:
-                best = dd
-        if not math.isinf(best):
-            out.append(best)
-    return out
-
-
-def _consecutive_gaps(points):
-    """Gaps (mm) between angularly-adjacent points — what clustering walks."""
-    if len(points) < 2:
-        return []
-    pts = sorted(points, key=lambda p: p[0])
-    gaps = [math.hypot(a[3] - b[3], a[4] - b[4]) for a, b in zip(pts, pts[1:])]
-    gaps.append(math.hypot(pts[0][3] - pts[-1][3], pts[0][4] - pts[-1][4]))  # wrap
-    return gaps
-
-
-# --------------------------------------------------------------------------
-# video views (unchanged — still needed for HSV tuning)
+# video views
 # --------------------------------------------------------------------------
 
 BOX_BGR = {"RED": (55, 39, 238), "GREEN": (44, 214, 68), "MAGENTA": (255, 0, 255)}
@@ -172,7 +126,7 @@ def render(view, colour):
         return np.where(mask[:, :, None] > 0,
                         cv2.addWeighted(bgr, 0.6, keep, 0.4, 0), dim)
 
-    # blobs: colour detections with their bearing (no distance in this model)
+    # blobs: boxes with the atan-computed bearing
     bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
     blobs = camera.detect_blobs(frame, hsv_cfg, cfg["min_blob_area"])
     for b in blobs:
@@ -242,7 +196,7 @@ def save():
 
 @app.route("/api/lidar_raw")
 def lidar_raw():
-    """Raw ranges + quality — sensor-health view, no filtering, no camera."""
+    """Raw ranges + quality — sensor-health view, no camera involved."""
     _, lidar_result = shared.snapshot()
     if lidar_result is None:
         return jsonify({"ok": False, "ranges": [], "qualities": [], "stats": None})
@@ -267,61 +221,28 @@ def lidar_raw():
 @app.route("/api/worldstate")
 def worldstate():
     """
-    The live fused view. Re-runs the robot's filter -> cluster -> fuse chain
-    with the CURRENT slider values, so tuning previews exactly what the robot
-    would compute.
+    Live fused view: detect camera obstacles with current HSV/HFOV, then
+    attach a lidar distance to each by bearing — the robot's own fuse().
     """
     cfg = live_cfg()
-    lidar_cfg = cfg.get("lidar", {})
 
-    # --- camera: colour detections with live HSV / HFOV ---
     frame = get_frame()
     cam_result = None
-    detections = []
     if frame is not None:
         blobs = camera.detect_blobs(frame, cfg["hsv"], cfg["min_blob_area"])
-        detections = camera.blobs_to_detections(blobs, camera.FRAME_W,
-                                                cfg["hfov_deg"])
-        cam_result = CameraResult(timestamp=time.time(), detections=detections)
+        obstacles = camera.blobs_to_obstacles(blobs, camera.FRAME_W,
+                                              cfg["hfov_deg"])
+        cam_result = CameraResult(timestamp=time.time(), obstacles=obstacles)
 
-    # --- lidar: re-filter + re-cluster the raw scan with live values ---
     _, lidar_result = shared.snapshot()
-    ranges_out, survivors_out, front = [], [], None
-    obstacles = []
-    neighbor_hist = gap_hist = None
+    fused = fuse(cam_result, lidar_result)
+
+    ranges_out, front = [], None
     if lidar_result is not None:
-        ranges = lidar_result.ranges
-        quals = getattr(lidar_result, "qualities", [0] * 360)
-
-        # quality-passed points = isolation disabled; this is the SET the
-        # isolation filter examines, so nearest-neighbour distances computed
-        # on it tell you where to put neighbour_dist_mm.
-        q_cfg = dict(lidar_cfg); q_cfg["min_neighbours"] = 0
-        quality_passed = filter_points(ranges, quals, q_cfg)
-
-        survivors = filter_points(ranges, quals, lidar_cfg)   # real fn, live cfg
-        obstacles = cluster_points(survivors, lidar_cfg)       # real fn, live cfg
-
-        live_lr = LidarResult(timestamp=time.time(), ranges=ranges,
-                              qualities=list(quals), obstacles=obstacles)
-        obstacles = fuse(cam_result, live_lr)
-
-        ranges_out = [None if math.isinf(d) else round(d) for d in ranges]
-        survivors_out = [[p[0], round(p[1]), p[2]] for p in survivors]  # deg,mm,q
-        f = sector_min(ranges, 0, 15)
+        ranges_out = [None if math.isinf(d) else round(d)
+                      for d in lidar_result.ranges]
+        f = sector_min(lidar_result.ranges, 0, 15)
         front = None if math.isinf(f) else round(f)
-
-        # distributions for the two tuning graphs
-        neighbor_hist = {
-            "counts": _histogram(_nearest_neighbour_dists(quality_passed)),
-            "bin_mm": HIST_BIN_MM, "max_mm": HIST_BIN_MM * HIST_N_BINS,
-            "threshold": lidar_cfg.get("neighbour_dist_mm", 150),
-        }
-        gap_hist = {
-            "counts": _histogram(_consecutive_gaps(survivors)),
-            "bin_mm": HIST_BIN_MM, "max_mm": HIST_BIN_MM * HIST_N_BINS,
-            "threshold": lidar_cfg.get("cluster_gap_mm", 120),
-        }
 
     return jsonify({
         "camera_ok": frame is not None,
@@ -329,21 +250,14 @@ def worldstate():
         "lidar_ok": lidar_result is not None,
         "front_mm": front,
         "ranges": ranges_out,
-        "survivors": survivors_out,
         "obstacles": [
             {"color": o.color,
              "bearing_deg": round(o.bearing_deg, 1),
-             "distance_mm": round(o.distance_mm),
-             "width_deg": round(o.width_deg, 1),
-             "point_count": o.point_count}
-            for o in obstacles
+             "distance_mm": (None if math.isinf(o.distance_mm)
+                             else round(o.distance_mm)),
+             "confidence": round(o.confidence, 2)}
+            for o in fused
         ],
-        "detections": [
-            {"color": d.color, "bearing_deg": round(d.bearing_deg, 1)}
-            for d in detections
-        ],
-        "neighbor_hist": neighbor_hist,
-        "gap_hist": gap_hist,
         "radar_max_mm": RADAR_MAX_MM,
     })
 
