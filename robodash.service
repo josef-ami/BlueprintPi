@@ -1,0 +1,21 @@
+[Unit]
+Description=Perception calibration dashboard
+# Don't fight main.py for the camera/lidar if that's also a systemd service
+Conflicts=robot.service
+After=network.target
+
+[Service]
+Type=simple
+User=suntzu
+WorkingDirectory=/home/suntzu
+Environment=PATH=/home/suntzu/robo-env/bin:/usr/bin:/bin
+ExecStart=/home/suntzu/robo-env/bin/python /home/suntzu/dashboard.py
+Restart=on-failure
+RestartSec=3
+
+# stdout/stderr land in the journal, not a manually managed log file
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
