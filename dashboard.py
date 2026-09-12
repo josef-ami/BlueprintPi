@@ -242,12 +242,16 @@ def worldstate():
 
     _, lidar_result = shared.snapshot()
     ranges_out, front = [], None
+    windows = []
     if lidar_result is not None:
         ranges = lidar_result.ranges
+        quals = getattr(lidar_result, "qualities", [0] * 360)
         for obs in obstacles:                       # live-parameter selection
             center = int(round(obs.bearing_deg)) % 360
             obs.distance_mm = select_range(ranges, center, match_deg,
                                            floor_mm=floor_mm, gap_split_mm=gap_mm)
+            windows.append(_window_diag(ranges, quals, center, match_deg,
+                                        floor_mm, gap_mm, obs))
         ranges_out = [None if math.isinf(d) else round(d) for d in ranges]
         f = sector_min(ranges, 0, 15)
         front = None if math.isinf(f) else round(f)
@@ -266,8 +270,76 @@ def worldstate():
              "confidence": round(o.confidence, 2)}
             for o in obstacles
         ],
+        "windows": windows,
         "radar_max_mm": RADAR_MAX_MM,
     })
+
+
+def _window_diag(ranges, quals, center, half_width, floor_mm, gap_mm, obs):
+    """
+    Decompose the select_range decision for one obstacle's bearing window, so
+    the UI can show WHY a distance was chosen — and specifically whether the
+    wall was returned because the pillar was absent, mis-aligned, floored out,
+    or not gap-split from the wall.
+
+    Each point: {off (deg from centre), deg, mm, q, passed_floor, kept}
+      kept = in the near cluster select_range actually took its min from.
+    """
+    pts = []
+    for offset in range(-half_width, half_width + 1):
+        deg = (center + offset) % 360
+        d = ranges[deg]
+        if math.isinf(d):
+            continue
+        pts.append({"off": offset, "deg": deg, "mm": round(d),
+                    "q": quals[deg], "passed_floor": d >= floor_mm, "kept": False})
+
+    # replicate select_range's kept-set exactly
+    survivors = sorted([p for p in pts if p["passed_floor"]], key=lambda p: p["mm"])
+    near = survivors
+    if gap_mm > 0 and survivors:
+        cut = len(survivors)
+        for i in range(1, len(survivors)):
+            if survivors[i]["mm"] - survivors[i - 1]["mm"] >= gap_mm:
+                cut = i
+                break
+        near = survivors[:cut]
+    near_mm = {p["mm"] for p in near}
+    for p in pts:
+        p["kept"] = p["passed_floor"] and p["mm"] in near_mm and (
+            not near or p["mm"] <= max(near_mm))
+
+    chosen = None if math.isinf(obs.distance_mm) else round(obs.distance_mm)
+    floored = [p for p in pts if not p["passed_floor"]]
+    passed = [p for p in pts if p["passed_floor"]]
+    verdict = "ok"
+    if not pts:
+        verdict = "empty"                    # nothing in window at all
+    elif chosen is None:
+        verdict = "all_floored" if floored else "empty"
+    else:
+        # "far_only": the camera says an obstacle is here, but every floored-
+        # in return sits in a single cluster with NO near member — so there's
+        # no distinct pillar return, just the wall. Detect by: no internal gap
+        # (gap-split found no pillar/wall split) AND the nearest survivor is
+        # beyond a pillar-plausible distance.
+        pm = sorted(p["mm"] for p in passed)
+        has_internal_gap = (any(pm[i] - pm[i - 1] >= gap_mm
+                                for i in range(1, len(pm)))
+                            if (gap_mm > 0 and len(pm) > 1) else False)
+        FAR_HINT_MM = 1000
+        if pm and not has_internal_gap and pm[0] >= FAR_HINT_MM:
+            verdict = "far_only"
+
+    return {
+        "color": obs.color,
+        "bearing_deg": round(obs.bearing_deg, 1),
+        "center_deg": center,
+        "chosen_mm": chosen,
+        "points": pts,
+        "n_floored": len(floored),
+        "verdict": verdict,
+    }
 
 
 # --------------------------------------------------------------------------
