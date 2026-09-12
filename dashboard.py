@@ -11,6 +11,11 @@ UI on port 8080.
 Sliders preview live against the current frame; nothing is written to
 config.json until you press Save. camera.py reads config.json at startup, so
 restart main.py to pick up saved values.
+
+Two lidar views are exposed:
+  /api/lidar_raw    - the lidar's own 360-reading array, no camera involved
+  /api/worldstate   - camera + lidar fused into obstacle {color,bearing,dist}
+Both read the SAME LidarResult from shared state; raw is just unfused.
 """
 
 import json
@@ -199,6 +204,34 @@ def save():
     except Exception as e:
         return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"}), 500
     return jsonify({"ok": True, "saved_at": time.time()})
+
+
+@app.route("/api/lidar_raw")
+def lidar_raw():
+    """
+    The lidar's own view of the world, with NO camera fusion applied.
+    This is LidarResult exactly as the lidar thread published it — useful
+    for judging sensor health independent of any camera/HSV tuning.
+    """
+    _, lidar_result = shared.snapshot()
+    if lidar_result is None:
+        return jsonify({"ok": False, "ranges": [], "stats": None})
+
+    ranges = lidar_result.ranges
+    valid = [d for d in ranges if not math.isinf(d)]
+    stats = {
+        "valid_count": len(valid),
+        "total": len(ranges),
+        "min_mm": round(min(valid)) if valid else None,
+        "max_mm": round(max(valid)) if valid else None,
+        "age_s": round(time.time() - lidar_result.timestamp, 2),
+    }
+    return jsonify({
+        "ok": True,
+        "ranges": [None if math.isinf(d) else round(d) for d in ranges],
+        "stats": stats,
+        "radar_max_mm": RADAR_MAX_MM,
+    })
 
 
 @app.route("/api/worldstate")
