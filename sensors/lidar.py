@@ -100,8 +100,46 @@ class LidarThread(threading.Thread):
 
 
 def sector_min(ranges, center_deg, half_width_deg):
-    """Smallest distance within +/- half_width of center_deg. inf if all clear."""
+    """Smallest distance within +/- half_width of center_deg. inf if all clear.
+    Kept as-is for the dashboard's coarse front-distance readout."""
     best = float("inf")
     for offset in range(-half_width_deg, half_width_deg + 1):
         best = min(best, ranges[(center_deg + offset) % 360])
     return best
+
+
+def select_range(ranges, center_deg, half_width_deg,
+                 floor_mm=0.0, gap_split_mm=0.0):
+    """
+    Choose the distance to the object at center_deg, robust to the wall behind
+    it and to spurious near-returns.
+
+    Pipeline:
+      1. gather valid returns in the +/- half_width window
+      2. floor: drop anything closer than floor_mm (chassis-radius + margin) so
+         a self-occlusion / stray near-return can't win the minimum
+      3. gap split: sort survivors; if a jump >= gap_split_mm appears, that jump
+         is the pillar->wall separation — keep only the near cluster below it
+      4. return the minimum of the near cluster (the pillar is nearest here by
+         construction), or inf if nothing valid remains
+
+    With floor_mm=0 and gap_split_mm=0 this reduces to a plain windowed min.
+    """
+    vals = []
+    for offset in range(-half_width_deg, half_width_deg + 1):
+        d = ranges[(center_deg + offset) % 360]
+        if not math.isinf(d) and d >= floor_mm:
+            vals.append(d)
+    if not vals:
+        return float("inf")
+
+    vals.sort()
+    if gap_split_mm > 0:
+        # cut at the first large jump; everything before it is the near cluster
+        cut = len(vals)
+        for i in range(1, len(vals)):
+            if vals[i] - vals[i - 1] >= gap_split_mm:
+                cut = i
+                break
+        vals = vals[:cut]
+    return vals[0]

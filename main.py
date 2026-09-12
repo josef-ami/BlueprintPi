@@ -14,17 +14,23 @@ import time
 import signal
 
 from worldstate import SharedState
-from sensors.camera import CameraThread
-from sensors.lidar import LidarThread, sector_min
+from sensors.camera import CameraThread, load_config
+from sensors.lidar import LidarThread, sector_min, select_range
 
 LOOP_HZ = 30
-BEARING_MATCH_DEG = 8   # lidar sector half-width searched around a bearing
+
+_FUSION = load_config().get("fusion", {})
+BEARING_MATCH_DEG = _FUSION.get("bearing_match_deg", 8)
+RANGE_FLOOR_MM = _FUSION.get("range_floor_mm", 0.0)
+GAP_SPLIT_MM = _FUSION.get("gap_split_mm", 0.0)
 
 
 def fuse(camera_result, lidar_result):
     """
-    Attach a distance to each camera obstacle from the lidar range at its
-    bearing. Obstacle keeps distance=inf if the lidar has no return there.
+    Attach a distance to each camera obstacle from the lidar returns at its
+    bearing, using floor + gap-split selection (see select_range): the pillar
+    is nearest by construction, so we take the min of the near cluster and
+    ignore the wall behind it. Distance stays inf if nothing valid is found.
     """
     if camera_result is None:
         return []
@@ -34,7 +40,9 @@ def fuse(camera_result, lidar_result):
     ranges = lidar_result.ranges
     for obs in obstacles:
         center = int(round(obs.bearing_deg)) % 360
-        obs.distance_mm = sector_min(ranges, center, BEARING_MATCH_DEG)
+        obs.distance_mm = select_range(ranges, center, BEARING_MATCH_DEG,
+                                       floor_mm=RANGE_FLOOR_MM,
+                                       gap_split_mm=GAP_SPLIT_MM)
     return obstacles
 
 
