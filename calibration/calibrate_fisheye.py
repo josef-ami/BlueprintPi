@@ -83,9 +83,17 @@ def main():
 
     K = np.zeros((3, 3))
     D = np.zeros((4, 1))
-    flags = (cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC
-             + cv2.fisheye.CALIB_FIX_SKEW
-             + cv2.fisheye.CALIB_CHECK_COND)
+
+    # Flag constants live under cv2.fisheye.* in some OpenCV builds and only
+    # under cv2.* in others (and occasionally neither name is generated).
+    # Resolve each from wherever it exists, falling back to its stable integer
+    # value so this works regardless of build.
+    def _flag(name, value):
+        return getattr(cv2.fisheye, name, getattr(cv2, name, value))
+
+    flags = (_flag("CALIB_RECOMPUTE_EXTRINSIC", 2)
+             + _flag("CALIB_FIX_SKEW", 8)
+             + _flag("CALIB_CHECK_COND", 4))
     try:
         rms, K, D, _, _ = cv2.fisheye.calibrate(
             objpoints, imgpoints, image_size, K, D,
