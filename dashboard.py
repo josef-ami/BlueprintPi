@@ -133,7 +133,9 @@ def render(view, colour):
         col = BOX_BGR.get(b["colour"], (255, 255, 255))
         cv2.rectangle(bgr, (b["x"], b["y"]),
                       (b["x"] + b["w"], b["y"] + b["h"]), col, 2)
-        bearing = camera.px_to_bearing(b["cx"], camera.FRAME_W, cfg["hfov_deg"])
+        bearing = camera.px_to_bearing(b["cx"], camera.FRAME_W, cfg["hfov_deg"],
+                                       cy=b["cy"],
+                                       offset_deg=cfg.get("camera_offset_deg", 0.0))
         cv2.putText(bgr, f"{bearing:+.1f}deg", (b["x"], max(14, b["y"] - 6)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1, cv2.LINE_AA)
     return bgr
@@ -238,7 +240,8 @@ def worldstate():
     if frame is not None:
         blobs = camera.detect_blobs(frame, cfg["hsv"], cfg["min_blob_area"])
         obstacles = camera.blobs_to_obstacles(blobs, camera.FRAME_W,
-                                              cfg["hfov_deg"])
+                                              cfg["hfov_deg"],
+                                              offset_deg=cfg.get("camera_offset_deg", 0.0))
 
     _, lidar_result = shared.snapshot()
     ranges_out, front = [], None
