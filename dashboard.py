@@ -24,7 +24,7 @@ from flask import Flask, Response, jsonify, render_template, request
 
 from worldstate import SharedState, CameraResult
 import sensors.camera as camera
-from sensors.lidar import LidarThread, sector_min, select_range
+from sensors.lidar import LidarThread, sector_min, select_range, pick_bearing
 from main import fuse
 
 PORT = 8080
@@ -218,6 +218,32 @@ def lidar_raw():
         },
         "radar_max_mm": RADAR_MAX_MM,
     })
+
+
+BEARING_TARGETS = {"deg0": 0, "deg90": 90, "deg270": 270}   # robot frame: fwd / left / right
+
+
+@app.route("/api/bearings")
+def bearings():
+    """Highest-confidence non-inf return near each of 0/90/270 deg, within an
+    adjustable +/- tolerance. Sensor-health view, no camera involved. `tol` is
+    integer degrees (query arg); ranges are already robot-frame (mount offset
+    folded in at ingestion), so the targets need no further correction."""
+    try:
+        tol = max(0, int(request.args.get("tol", 2)))
+    except (TypeError, ValueError):
+        tol = 2
+    _, lidar_result = shared.snapshot()
+    if lidar_result is None:
+        return jsonify({"ok": False, "tol": tol, "picks": {}})
+    ranges = lidar_result.ranges
+    quals = getattr(lidar_result, "qualities", [0] * 360)
+    picks = {}
+    for key, tgt in BEARING_TARGETS.items():
+        p = pick_bearing(ranges, quals, tgt, tol)
+        picks[key] = (None if p is None
+                      else {"deg": p[0], "mm": round(p[1]), "q": p[2]})
+    return jsonify({"ok": True, "tol": tol, "picks": picks})
 
 
 @app.route("/api/worldstate")

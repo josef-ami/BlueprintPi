@@ -143,3 +143,29 @@ def select_range(ranges, center_deg, half_width_deg,
                 break
         vals = vals[:cut]
     return vals[0]
+
+
+def pick_bearing(ranges, quals, center_deg, half_width_deg):
+    """
+    Highest-quality non-inf return within +/- half_width_deg of center_deg.
+
+    Returns (deg, dist_mm, quality) of the winner, or None if every bin in the
+    window is inf. Distinct from select_range: no floor / gap-split logic and no
+    nearest-cluster bias — it answers "what is the most confident return near
+    this bearing", for a raw sensor-health readout, not a fused pillar distance.
+
+    Ties in quality break toward the bin nearest center_deg (offsets are visited
+    in order of increasing |offset|, and only a strictly higher quality wins).
+    half_width_deg is an integer because ranges/quals are 1-degree-binned.
+    """
+    center = int(round(center_deg)) % 360
+    best = None
+    for offset in sorted(range(-half_width_deg, half_width_deg + 1), key=abs):
+        deg = (center + offset) % 360
+        d = ranges[deg]
+        if math.isinf(d):
+            continue
+        q = quals[deg]
+        if best is None or q > best[2]:
+            best = (deg, d, q)
+    return best
