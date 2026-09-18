@@ -257,6 +257,9 @@ function renderControls(){
   document.getElementById("area").value=cfg.min_blob_area;
   document.getElementById("area-v").textContent=cfg.min_blob_area;
   document.getElementById("swap").checked=!!cfg.swap_rb;
+  const _tv=((cfg.lidar&&cfg.lidar.bearing_tol_deg)==null)?2:cfg.lidar.bearing_tol_deg;
+  document.getElementById("btol").value=_tv;
+  document.getElementById("btol-v").textContent=_tv;
 }
 let pending=null;
 function pushLive(){markDirty();clearTimeout(pending);
@@ -382,7 +385,10 @@ function applyBearings(d){const P=d.picks||{};
 }
 async function fetchBearings(){try{applyBearings(await(await fetch("/api/bearings?tol="+btol.value)).json());}catch(e){}}
 async function pollBearings(){await fetchBearings();setTimeout(pollBearings,200);}
-btol.addEventListener("input",e=>{document.getElementById("btol-v").textContent=e.target.value;fetchBearings();});
+btol.addEventListener("input",e=>{const v=+e.target.value;
+  document.getElementById("btol-v").textContent=v;
+  if(!cfg.lidar)cfg.lidar={};cfg.lidar.bearing_tol_deg=v;pushLive();
+  fetchBearings();});
 
 /* ---------- wiring ---------- */
 document.querySelectorAll(".tabs button").forEach(b=>{b.onclick=()=>{document.querySelectorAll(".tabs button").forEach(x=>x.setAttribute("aria-pressed",x===b));view=b.dataset.v;refreshFeed();};});
