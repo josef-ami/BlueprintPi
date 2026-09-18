@@ -1,34 +1,42 @@
 {
-  "hfov_deg": 62.0,
-  "min_blob_area": 300,
-  "swap_rb": false,
-  "hsv": {
-    "RED": [
+  "camera_intrinsics": {
+    "D": [
+      0.05460518934568049,
+      -0.3105792203926291,
+      0.538008476718999,
+      -0.3104152610068569
+    ],
+    "K": [
       [
-        [
-          0,
-          120,
-          70
-        ],
-        [
-          10,
-          255,
-          255
-        ]
+        383.20119761034823,
+        0,
+        330.52849471706367
       ],
       [
-        [
-          170,
-          120,
-          70
-        ],
-        [
-          180,
-          255,
-          255
-        ]
+        0,
+        383.4524308500294,
+        228.5909870627763
+      ],
+      [
+        0,
+        0,
+        1
       ]
     ],
+    "image_size": [
+      640,
+      480
+    ],
+    "model": "fisheye",
+    "rms_reproj_error": 1.7575010745141275
+  },
+  "fusion": {
+    "bearing_match_deg": 8,
+    "gap_split_mm": 200,
+    "range_floor_mm": 120
+  },
+  "hfov_deg": 160,
+  "hsv": {
     "GREEN": [
       [
         [
@@ -56,20 +64,43 @@
           255
         ]
       ]
+    ],
+    "RED": [
+      [
+        [
+          0,
+          120,
+          70
+        ],
+        [
+          10,
+          255,
+          255
+        ]
+      ],
+      [
+        [
+          170,
+          120,
+          70
+        ],
+        [
+          180,
+          255,
+          255
+        ]
+      ]
     ]
   },
   "lidar": {
-    "quality_floor": 10,
-    "min_neighbours": 2,
-    "neighbour_dist_mm": 150,
     "cluster_gap_mm": 120,
-    "min_cluster_points": 3,
     "max_range_mm": 3000,
-    "mount_offset_deg": 0
+    "min_cluster_points": 3,
+    "min_neighbours": 2,
+    "mount_offset_deg": 0,
+    "neighbour_dist_mm": 150,
+    "quality_floor": 10
   },
-  "fusion": {
-    "range_floor_mm": 120,
-    "gap_split_mm": 200,
-    "bearing_match_deg": 8
-  }
+  "min_blob_area": 300,
+  "swap_rb": true
 }
