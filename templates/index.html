@@ -84,6 +84,12 @@
   .legend span{display:inline-flex;align-items:center;gap:5px}
   .legend i{width:10px;height:10px;border-radius:2px;display:inline-block}
   .empty{color:var(--muted);font-style:italic}
+  .bearings{display:flex;align-items:flex-end;gap:24px;flex-wrap:wrap;margin-bottom:18px}
+  .brow{display:flex;gap:22px;align-items:center}
+  .bcell{display:flex;flex-direction:column;gap:2px}
+  .bcell .btag{font-size:12px;color:var(--muted)}
+  .bcell .bval{font-size:15px}
+  .bcell .bval.miss{color:var(--muted);font-style:italic}
   @media (max-width:900px){main{grid-template-columns:1fr}.col-video{border-right:none}.diag-top{grid-template-columns:1fr}}
 </style>
 </head>
@@ -150,6 +156,18 @@
 
 <div class="diag">
   <h2>Fusion diagnostics &nbsp;·&nbsp; front <span class="num" id="front">—</span> &nbsp;·&nbsp; <span id="lidarstats" class="num" style="color:var(--muted)">—</span></h2>
+
+  <div class="bearings">
+    <div class="rng" style="max-width:260px;margin:0">
+      <label for="btol">Bearing tolerance <b>±<span id="btol-v" class="num">2</span>°</b></label>
+      <input type="range" id="btol" min="0" max="20" step="1" value="2">
+    </div>
+    <div class="brow">
+      <div class="bcell"><span class="btag">0° (fwd)</span><span class="num bval miss" id="b-deg0">—</span></div>
+      <div class="bcell"><span class="btag">90° (left)</span><span class="num bval miss" id="b-deg90">—</span></div>
+      <div class="bcell"><span class="btag">270° (right)</span><span class="num bval miss" id="b-deg270">—</span></div>
+    </div>
+  </div>
 
   <div class="diag-top">
     <div class="radars">
@@ -354,6 +372,17 @@ async function poll(){
     drawRadar(d);renderWindows(d);
   }catch(e){}setTimeout(poll,200);
 }
+const btol=document.getElementById("btol");
+function fmtBearing(p){return p?`${p.mm} mm · q${p.q} @${p.deg}°`:"no return";}
+function applyBearings(d){const P=d.picks||{};
+  ["deg0","deg90","deg270"].forEach(k=>{
+    const el=document.getElementById("b-"+k),p=d.ok?P[k]:null;
+    el.textContent=d.ok?fmtBearing(p):"—";
+    el.classList.toggle("miss",!p);});
+}
+async function fetchBearings(){try{applyBearings(await(await fetch("/api/bearings?tol="+btol.value)).json());}catch(e){}}
+async function pollBearings(){await fetchBearings();setTimeout(pollBearings,200);}
+btol.addEventListener("input",e=>{document.getElementById("btol-v").textContent=e.target.value;fetchBearings();});
 
 /* ---------- wiring ---------- */
 document.querySelectorAll(".tabs button").forEach(b=>{b.onclick=()=>{document.querySelectorAll(".tabs button").forEach(x=>x.setAttribute("aria-pressed",x===b));view=b.dataset.v;refreshFeed();};});
@@ -367,7 +396,7 @@ document.getElementById("revert").onclick=async()=>{const r=await(await fetch("/
 (async function init(){
   const r=await(await fetch("/api/config")).json();
   cfg=r.live;if(!cfg.fusion)cfg.fusion={};
-  renderControls();refreshFeed();poll();pollRaw();
+  renderControls();refreshFeed();poll();pollRaw();pollBearings();
   document.getElementById("save").disabled=true;document.getElementById("save").textContent="Saved";
 })();
 </script>

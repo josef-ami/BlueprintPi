@@ -19,6 +19,7 @@ import cv2
 import numpy as np
 
 from worldstate import SharedState, CameraResult, Obstacle
+from libcamera import Transform
 
 FRAME_W = 640
 FRAME_H = 480
