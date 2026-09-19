@@ -8,8 +8,8 @@ After=network.target
 Type=simple
 User=suntzu
 WorkingDirectory=/home/suntzu
-Environment=PATH=/home/suntzu/robo-env/bin:/usr/bin:/bin
-ExecStart=/home/suntzu/robo-env/bin/python /home/suntzu/dashboard.py
+Environment=PATH=/home/suntzu/env/bin:/usr/bin:/bin
+ExecStart=/home/suntzu/env/bin/python /home/suntzu/dashboard.py
 Restart=on-failure
 RestartSec=3
 
