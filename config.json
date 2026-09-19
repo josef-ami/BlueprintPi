@@ -95,16 +95,12 @@
   "lidar": {
     "cluster_gap_mm": 120,
     "max_range_mm": 3000,
-<<<<<<< HEAD
     "min_cluster_points": 3,
     "min_neighbours": 2,
     "mount_offset_deg": 0,
     "neighbour_dist_mm": 150,
-    "quality_floor": 10
-=======
-    "mount_offset_deg": 0,
+    "quality_floor": 10,
     "bearing_tol_deg": 2
->>>>>>> 447105395d8faee1292f06cb3274eddfec2c51a3
   },
   "min_blob_area": 300,
   "swap_rb": true
