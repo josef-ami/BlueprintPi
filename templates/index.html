@@ -100,6 +100,8 @@
   <div class="pills">
     <span class="pill"><span class="dot" id="d-cam"></span>Camera</span>
     <span class="pill"><span class="dot" id="d-lidar"></span>Lidar</span>
+    <span class="pill"><span class="dot" id="d-stream"></span>STM32 stream</span>
+    <button id="stream-toggle">Start streaming</button>
     <button class="save" id="save">Save to config.json</button>
   </div>
 </header>
@@ -167,6 +169,17 @@
       <div class="bcell"><span class="btag">90° (left)</span><span class="num bval miss" id="b-deg90">—</span></div>
       <div class="bcell"><span class="btag">270° (right)</span><span class="num bval miss" id="b-deg270">—</span></div>
     </div>
+  </div>
+
+  <div class="bearings" id="streamRow">
+    <div class="brow">
+      <div class="bcell"><span class="btag">Front</span><span class="num bval miss" id="s-f">—</span></div>
+      <div class="bcell"><span class="btag">Left</span><span class="num bval miss" id="s-l">—</span></div>
+      <div class="bcell"><span class="btag">Right</span><span class="num bval miss" id="s-r">—</span></div>
+      <div class="bcell"><span class="btag">rev/s</span><span class="num bval" id="s-revs">—</span></div>
+      <div class="bcell"><span class="btag">queue</span><span class="num bval" id="s-queue">—</span></div>
+    </div>
+    <span class="hint" id="stream-hint" style="margin:0">Stopped. Streams left/front/right to the STM32 over /dev/ttyACM0 at ±<span id="stream-tol">2</span>° (the tolerance set above, live — no save needed).</span>
   </div>
 
   <div class="diag-top">
@@ -260,6 +273,7 @@ function renderControls(){
   const _tv=((cfg.lidar&&cfg.lidar.bearing_tol_deg)==null)?2:cfg.lidar.bearing_tol_deg;
   document.getElementById("btol").value=_tv;
   document.getElementById("btol-v").textContent=_tv;
+  document.getElementById("stream-tol").textContent=_tv;
 }
 let pending=null;
 function pushLive(){markDirty();clearTimeout(pending);
@@ -387,8 +401,41 @@ async function fetchBearings(){try{applyBearings(await(await fetch("/api/bearing
 async function pollBearings(){await fetchBearings();setTimeout(pollBearings,200);}
 btol.addEventListener("input",e=>{const v=+e.target.value;
   document.getElementById("btol-v").textContent=v;
+  document.getElementById("stream-tol").textContent=v;
   if(!cfg.lidar)cfg.lidar={};cfg.lidar.bearing_tol_deg=v;pushLive();
   fetchBearings();});
+
+/* ---------- STM32 stream ---------- */
+let streamRunning=false;
+function fmtMm(v){return v===null||v===undefined?"—":v+" mm";}
+function applyStreamStatus(s){
+  document.getElementById("d-stream").className="dot "+(s.running&&s.live?"on":"off");
+  streamRunning=!!s.running;
+  document.getElementById("stream-toggle").textContent=streamRunning?"Stop streaming":"Start streaming";
+  const hint=document.getElementById("stream-hint");
+  if(!streamRunning){
+    ["s-f","s-l","s-r"].forEach(id=>{const el=document.getElementById(id);el.textContent="—";el.classList.add("miss");});
+    document.getElementById("s-revs").textContent="—";document.getElementById("s-queue").textContent="—";
+    hint.textContent=s.error?("Stopped — "+s.error):"Stopped. Streams left/front/right to the STM32 over /dev/ttyACM0 at ±"+btol.value+"° (the tolerance set above, live — no save needed).";
+    return;
+  }
+  document.getElementById("s-f").textContent=fmtMm(s.f);document.getElementById("s-f").classList.toggle("miss",s.f==null);
+  document.getElementById("s-l").textContent=fmtMm(s.l);document.getElementById("s-l").classList.toggle("miss",s.l==null);
+  document.getElementById("s-r").textContent=fmtMm(s.r);document.getElementById("s-r").classList.toggle("miss",s.r==null);
+  document.getElementById("s-revs").textContent=s.rev_per_s;
+  document.getElementById("s-queue").textContent=s.queue_depth;
+  hint.textContent=s.live?`Streaming to ${s.port} at ${s.send_hz} Hz.`:"Lidar STALE — going silent (STM32 watchdog will trip).";
+}
+async function pollStream(){try{applyStreamStatus(await(await fetch("/api/stream/status")).json());}catch(e){}setTimeout(pollStream,300);}
+document.getElementById("stream-toggle").addEventListener("click",async e=>{
+  const btn=e.target;btn.disabled=true;
+  try{
+    const url=streamRunning?"/api/stream/stop":"/api/stream/start";
+    const r=await(await fetch(url,{method:"POST"})).json();
+    if(!r.ok)document.getElementById("stream-hint").textContent="Error — "+r.error;
+  }catch(err){document.getElementById("stream-hint").textContent="Error — "+err;}
+  finally{btn.disabled=false;}
+});
 
 /* ---------- wiring ---------- */
 document.querySelectorAll(".tabs button").forEach(b=>{b.onclick=()=>{document.querySelectorAll(".tabs button").forEach(x=>x.setAttribute("aria-pressed",x===b));view=b.dataset.v;refreshFeed();};});
@@ -402,7 +449,7 @@ document.getElementById("revert").onclick=async()=>{const r=await(await fetch("/
 (async function init(){
   const r=await(await fetch("/api/config")).json();
   cfg=r.live;if(!cfg.fusion)cfg.fusion={};
-  renderControls();refreshFeed();poll();pollRaw();pollBearings();
+  renderControls();refreshFeed();poll();pollRaw();pollBearings();pollStream();
   document.getElementById("save").disabled=true;document.getElementById("save").textContent="Saved";
 })();
 </script>

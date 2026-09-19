@@ -22,10 +22,15 @@ import cv2
 import numpy as np
 from flask import Flask, Response, jsonify, render_template, request
 
+import serial
+
 from worldstate import SharedState, CameraResult
 import sensors.camera as camera
 from sensors.lidar import LidarThread, sector_min, select_range, pick_bearing
 from main import fuse
+from openRound import (UART_PORT, UART_BAUD, SEND_HZ, STALE_S,
+                       load_tol as load_saved_tol, read_three, pack_frame,
+                       lidar_live)
 
 PORT = 8080
 JPEG_QUALITY = 70
@@ -91,6 +96,100 @@ capture = CaptureThread()
 def get_frame():
     with _frame_lock:
         return None if _latest_frame is None else _latest_frame.copy()
+
+
+# --------------------------------------------------------------------------
+# STM32 stream (Open-round wire feed, toggled from the dashboard UI)
+# --------------------------------------------------------------------------
+#
+# Reuses openRound.py's read_three/pack_frame/lidar_live against the SAME
+# LidarThread instance this dashboard already owns (no second lidar
+# connection). Unlike standalone openRound.py, the bearing tolerance is read
+# from the LIVE (unsaved) dashboard config every send, per current
+# instructions — no restart needed to pick up a slider change. If this
+# thread is running, do not also run openRound.py standalone: both would
+# try to open UART_PORT.
+
+class StreamThread(threading.Thread):
+    def __init__(self, lidar_thread):
+        super().__init__(name="STM32Stream", daemon=True)
+        self.lidar = lidar_thread
+        self._stop = threading.Event()
+        self.error = None
+        self.ser = None
+        # polled by /api/stream/status
+        self.live = False
+        self.f = self.l = self.r = None
+        self.rev_per_s = 0
+        self.queue_depth = 0
+
+    def stop(self):
+        self._stop.set()
+
+    def run(self):
+        try:
+            self.ser = serial.Serial(UART_PORT, UART_BAUD, timeout=0)
+        except serial.SerialException as e:
+            self.error = f"cannot open {UART_PORT}: {e}"
+            print(f"[dashboard/stream] {self.error}")
+            return
+
+        period = 1.0 / SEND_HZ
+        last_log = time.monotonic()
+        last_rev = 0
+        was_live = False
+        rx_buf = b""
+
+        print(f"[dashboard/stream] streaming to {UART_PORT} at {SEND_HZ} Hz "
+              f"(live tol from dashboard config)")
+        try:
+            while not self._stop.is_set():
+                now = time.monotonic()
+                live = lidar_live(self.lidar, now)
+                self.live = live
+
+                if live:
+                    tol = live_cfg().get("lidar", {}).get(
+                        "bearing_tol_deg", load_saved_tol())
+                    f, l, r = read_three(self.lidar._ranges,
+                                         self.lidar._quals, tol)
+                    self.f, self.l, self.r = f, l, r
+                    self.ser.write(pack_frame(f, l, r, self.lidar.rev))
+                if live != was_live:
+                    print("[dashboard/stream] lidar LIVE - streaming" if live
+                          else "[dashboard/stream] lidar STALE - silent")
+                    was_live = live
+
+                n = self.ser.in_waiting
+                if n:
+                    rx_buf += self.ser.read(n)
+                    *lines, rx_buf = rx_buf.split(b"\n")
+                    for line in lines:
+                        print("[stm32] " +
+                             line.decode("ascii", "replace").rstrip())
+                    if len(rx_buf) > 512:
+                        rx_buf = b""
+
+                if now - last_log >= 1.0:
+                    self.rev_per_s = self.lidar.rev - last_rev
+                    self.queue_depth = self.lidar.queue_depth()
+                    last_rev = self.lidar.rev
+                    last_log = now
+
+                time.sleep(period)
+        except serial.SerialException as e:
+            self.error = f"serial error: {e} (STM32 unplugged/reset?)"
+            print(f"[dashboard/stream] {self.error}")
+        finally:
+            self.live = False
+            try:
+                self.ser.close()
+            except Exception:
+                pass
+            print("[dashboard/stream] stopped")
+
+
+stream_thread = None
 
 
 # --------------------------------------------------------------------------
@@ -194,6 +293,48 @@ def save():
     except Exception as e:
         return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"}), 500
     return jsonify({"ok": True, "saved_at": time.time()})
+
+
+@app.route("/api/stream/start", methods=["POST"])
+def stream_start():
+    global stream_thread
+    if lidar_thread is None or not lidar_thread.is_alive():
+        return jsonify({"ok": False,
+                        "error": "lidar not running, cannot start stream"}), 400
+    if stream_thread is not None and stream_thread.is_alive():
+        return jsonify({"ok": False, "error": "already streaming"}), 400
+    stream_thread = StreamThread(lidar_thread)
+    stream_thread.start()
+    time.sleep(0.1)  # let an immediate open failure surface
+    if stream_thread.error:
+        return jsonify({"ok": False, "error": stream_thread.error}), 500
+    return jsonify({"ok": True})
+
+
+@app.route("/api/stream/stop", methods=["POST"])
+def stream_stop():
+    global stream_thread
+    if stream_thread is not None:
+        stream_thread.stop()
+        stream_thread.join(timeout=2.0)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/stream/status")
+def stream_status():
+    if stream_thread is None or not stream_thread.is_alive():
+        return jsonify({"running": False,
+                        "error": stream_thread.error if stream_thread else None})
+    return jsonify({
+        "running": True,
+        "live": stream_thread.live,
+        "error": stream_thread.error,
+        "f": stream_thread.f, "l": stream_thread.l, "r": stream_thread.r,
+        "rev_per_s": stream_thread.rev_per_s,
+        "queue_depth": stream_thread.queue_depth,
+        "port": UART_PORT,
+        "send_hz": SEND_HZ,
+    })
 
 
 @app.route("/api/lidar_raw")
@@ -388,6 +529,9 @@ def main():
                 debug=False, use_reloader=False)
     finally:
         capture.stop()
+        if stream_thread is not None:
+            stream_thread.stop()
+            stream_thread.join(timeout=2.0)
         if lidar_thread is not None:
             lidar_thread.stop()
             lidar_thread.join(timeout=2.0)

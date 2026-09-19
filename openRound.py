@@ -6,8 +6,14 @@ ONE job: stream the three bearing distances (0 deg forward, 90 deg left,
 No camera, no fusion, no FSM here — the STM32 owns the driving; this process
 is a pure sensor pipe (plus it echoes the STM32's '#' log lines to stdout).
 
-It owns the lidar (LidarThread), so run it INSTEAD of main.py / dashboard.py —
-one process may hold the lidar at a time.
+Run standalone, it owns the lidar (LidarThread) itself, so run it INSTEAD of
+main.py / dashboard.py — one process may hold the lidar at a time.
+
+dashboard.py can ALSO drive this same wire protocol from inside its own
+process (Start/Stop toggle in the UI), reusing the pure functions below
+(load_tol, read_three, pack_frame) against the LidarThread it already owns,
+instead of duplicating this logic. Do not run openRound.py standalone at the
+same time as that dashboard toggle — both would try to open UART_PORT.
 
 Wire frame — one ASCII line per send, SEND_HZ times a second:
 
