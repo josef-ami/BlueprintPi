@@ -17,6 +17,7 @@ import time
 
 import cv2
 import numpy as np
+from libcamera import Transform
 
 from worldstate import SharedState, CameraResult, Obstacle
 from libcamera import Transform
@@ -152,11 +153,13 @@ def blobs_to_obstacles(blobs, frame_w, hfov_deg, offset_deg=0.0):
     ]
 
 
-def open_camera(width=FRAME_W, height=FRAME_H):
+def open_camera(width=FRAME_W, height=FRAME_H, hflip=True, vflip=True):
     from picamera2 import Picamera2
     cam = Picamera2()
     cam.configure(cam.create_preview_configuration(
-        main={"size": (width, height), "format": "RGB888"}))
+        main={"size": (width, height), "format": "RGB888"},
+        transform=Transform(hflip=int(hflip), vflip=int(vflip)),
+    ))
     cam.start()
     time.sleep(0.5)
     return cam
