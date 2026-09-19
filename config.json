@@ -1,4 +1,19 @@
 {
+  "avoid": {
+    "car_half_width_mm": 57.1,
+    "confirm_ticks": 3,
+    "engage_mm": 900,
+    "freeze_mm": 350,
+    "margin_mm": 40,
+    "max_bearing_deg": 50,
+    "max_heading_deg": 45,
+    "min_range_mm": 150,
+    "pillar_half_width_mm": 25,
+    "refractory_mm": 150,
+    "tail_clear_mm": 150,
+    "wall_guard": true,
+    "wall_margin_mm": 90
+  },
   "camera_intrinsics": {
     "D": [
       0.05460518934568049,
