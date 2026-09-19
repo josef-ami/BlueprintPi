@@ -4,7 +4,16 @@ Lidar adapter — camera-first: supplies DISTANCE only.
 The lidar maintains a rolling 360-degree range array (plus per-angle quality
 for the dashboard). It no longer detects or clusters obstacles — that's the
 camera's job now. Fusion looks up a distance at the camera obstacle's bearing
-via sector_min.
+via select_range.
+
+Liveness / freshness (used by openRound.py):
+  - self.rev           completed revolutions, +1 each time the raw angle wraps
+                       360 -> 0. Each bearing bin gets at most one new sample
+                       per revolution, so consumers debounce per rev, not per
+                       send.
+  - self.last_point_t  time.monotonic() of the last point received, valid or
+                       not. If it stops advancing, the scan has stalled even
+                       though the bins still hold old values.
 """
 
 import asyncio
@@ -19,7 +28,7 @@ from worldstate import SharedState, LidarResult
 
 PORT = "/dev/ttyUSB0"
 BAUD = 460800
-PUBLISH_PERIOD = 0.05   # 20 Hz
+PUBLISH_PERIOD = 0.05   # 20 Hz — SharedState snapshot for main.py / dashboard
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "config.json")
@@ -42,6 +51,12 @@ class LidarThread(threading.Thread):
         self.mount_offset = self.cfg.get("mount_offset_deg", 0)
         self._ranges = [float("inf")] * 360
         self._quals = [0] * 360
+
+        # freshness / liveness, read from other threads (plain attribute
+        # reads/writes are atomic under the GIL)
+        self.rev = 0
+        self.last_point_t = 0.0
+        self._last_a = None
 
     def run(self):
         self._loop = asyncio.new_event_loop()
@@ -79,8 +94,15 @@ class LidarThread(threading.Thread):
                 point = await asyncio.wait_for(queue.get(), timeout=0.5)
             except asyncio.TimeoutError:
                 continue
+
+            a = point["a_deg"]
+            if self._last_a is not None and a < self._last_a - 180.0:
+                self.rev += 1                  # raw angle wrapped: sweep done
+            self._last_a = a
+            self.last_point_t = time.monotonic()
+
             d = point["d_mm"]
-            idx = int(round(point["a_deg"]) + self.mount_offset) % 360
+            idx = int(round(a) + self.mount_offset) % 360
             self._ranges[idx] = float("inf") if d is None else float(d)
             self._quals[idx] = point["q"]
 
@@ -93,6 +115,14 @@ class LidarThread(threading.Thread):
                 ok=True,
             ))
             await asyncio.sleep(PUBLISH_PERIOD)
+
+    def queue_depth(self):
+        """Points waiting in rplidarc1's queue; should hover near 0.
+        A growing number means _consume can't keep up (lag grows over time)."""
+        try:
+            return self._lidar.output_queue.qsize() if self._lidar else -1
+        except Exception:
+            return -1
 
     def stop(self):
         if self._loop is not None and self._async_stop is not None:
