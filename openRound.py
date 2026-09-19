@@ -77,7 +77,7 @@ def _u16(mm):
 
 
 def pack_frame(front_mm, left_mm, right_mm):
-    payload = struct.pack("<HHH", _u16(front_mm), _u16(left_mm), _u16(right_mm))
+    payload = struct.pack("<HHH", _u16(left_mm), _u16(front_mm), _u16(right_mm))
     xor = 0
     for b in payload:
         xor ^= b
