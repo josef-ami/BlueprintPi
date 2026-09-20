@@ -440,7 +440,6 @@
         <span class="cn" id="sc-IDLE">IDLE</span><span class="ar">→</span>
         <span class="cn" id="sc-CONFIRMING">CONFIRMING</span><span class="ar">→</span>
         <span class="cn" id="sc-TRACK">TRACK</span><span class="ar">→</span>
-        <span class="cn" id="sc-COMMIT">COMMIT</span><span class="ar">→</span>
         <span class="cn" id="sc-REFRACTORY">REFRACTORY</span><span class="ar">→ IDLE</span>
         <span class="cn badge" id="sc-PAUSED">PAUSED · STM32 busy</span>
         <span class="cn badge" id="sc-DISABLED">DISABLED · --no-avoid</span>
@@ -779,7 +778,7 @@ const nbar=f=>`<span class="nbar"><i style="width:${pct(f).toFixed(0)}%"></i></s
 const STN=["BOOT","HEADING","AVOID","TURN90","FINISH","RECOVER","STOPPED"];
 /* ObstacleLap.cpp constants, mirrored for the descriptions only */
 const FW={START_DELAY:5000,GRACE:15000,SIDE_OPEN:1500,REVS:3,PANIC:200,CLEAR:350,REC_PWM:90,
-  REC_MAX:300,REC_TRIES:3,CORNERS:12,SAFETY:4000,CORNER_LOCK:500,AVOID_LOCK:300,AVOID_CAP:1500,
+  REC_MAX:300,REC_TRIES:3,CORNERS:12,SAFETY:4000,CORNER_LOCK:500,AVOID_LOCK:150,AVOID_CAP:1500,
   AVOID_TO:5000,FIN_TOL:60,BASE:70,AVOID_PWM:60,TURN_CAP:1200,TURN_STOP:0.3,LIDAR_STALE:200,
   LIDAR_DEAD:1000,LINK_STALE:250,STRAIGHT:76.5,CONFIRM:3};
 const ICON={fire:"▶",block:"■",wait:"○",ok:"✓",warn:"!",info:"·"};
@@ -1027,15 +1026,13 @@ function describeStm32(d,t,tm,st,ss){
   }
   else if(S==="AVOID"){
     const green=st.p_green, a=st.p_action;
-    phase=`${green?"GREEN · pass on its left":"RED · pass on its right"} · ${a===2?"COMMIT":a===1?"TRACK":"released"}`;
+    phase=`${green?"GREEN · pass on its left":"RED · pass on its right"} · ${a===1?"TRACK":"released"}`;
     lead=`Threading a pillar: holding the Pi-solved absolute heading ${sg(st.target_heading_deg)}° (now ${sg(hd)}°, error ${sg(err)}°) at PWM ${st.motor_pwm} (AVOID_SPEED ${FW.AVOID_PWM}), ${servoText(st.servo_deg)}.`;
-    if(a===1) rows+=nrow(st.link_stale?"warn":"info","Mode TRACK",st.link_stale?"link stale: re-basing stopped, the leg now expires on its own distance":"each fresh frame resets the heading and re-bases the leg, so it cannot expire while TRACK lasts");
-    else if(a===2) rows+=nrow("info","Mode COMMIT","frozen: the leg runs out on odometry, even with the pillar out of view");
+    if(a===1) rows+=nrow(st.link_stale?"warn":"info","Mode TRACK",st.link_stale?"link stale: re-basing stopped — the backstops below are the only way out until TRACK resumes":"each fresh TRACK frame re-bases the odometry, so this never runs out on its own while frames keep arriving. Release is the Pi's call alone (AVOID_NONE), the instant it sees the pillar clear or gone.");
     else rows+=nrow("fire","Pi sent NONE","avoid released → HEADING");
-    rows+=nrow(st.phase_mm>=st.avoid_leg_mm?"fire":"wait","Leg",`${st.phase_mm} / ${st.avoid_leg_mm} mm ${nbar(st.phase_mm/Math.max(1,st.avoid_leg_mm))} (TELEM: ${mm(tm.avoid_remaining_mm)} left)`);
-    rows+=nrow(st.phase_mm>=FW.AVOID_CAP?"fire":"wait","Backstop: distance cap",`${st.phase_mm} / ${FW.AVOID_CAP} mm ${nbar(st.phase_mm/FW.AVOID_CAP)}`);
+    rows+=nrow(st.phase_mm>=FW.AVOID_CAP?"fire":"wait","Backstop: distance cap",`${st.phase_mm} / ${FW.AVOID_CAP} mm ${nbar(st.phase_mm/FW.AVOID_CAP)} — last resort only, engages if TRACK ever stops re-basing`);
     rows+=nrow(st.avoid_ms>=FW.AVOID_TO?"fire":"wait","Backstop: timeout",`${secs(st.avoid_ms)} / 5.0 s ${nbar(st.avoid_ms/FW.AVOID_TO)}`);
-    foot=`On exit: HEADING with a ${FW.AVOID_LOCK} mm corner lockout. Corners are not watched while yawed; one that opens now is counted when HEADING resumes.`;
+    foot=`On exit: HEADING with a ${FW.AVOID_LOCK} mm post-avoid lockout, but the locked side's open-revolution count survives the avoid (it is not re-zeroed on this particular entry) — so a corner right after a pillar is not missed. Corners are not watched while yawed; one that opens now is counted when HEADING resumes.`;
   }
   else if(S==="TURN90"){
     const cw=tm.clockwise; phase=`corner ${tm.corner_count}/${FW.CORNERS} · ${cw?"right":"left"}`;
@@ -1071,7 +1068,7 @@ function describeStm32(d,t,tm,st,ss){
 }
 function describeTelemOnly(tm){
   const D={BOOT:"Waiting for the Pi's HELLO, then a 5 s countdown.",HEADING:"Holding the lane heading; watching for a pillar manoeuvre, a corner and the finish.",
-    AVOID:"Holding the heading the Pi solved, for the leg it asked for.",TURN90:"Eased 90° arc, ended on IMU heading.",FINISH:"Lap complete, stopped.",
+    AVOID:"Holding the heading the Pi solved, until the Pi says the pillar is clear.",TURN90:"Eased 90° arc, ended on IMU heading.",FINISH:"Lap complete, stopped.",
     RECOVER:"Wall panic: backing off, then resuming.",STOPPED:"Stopped by CMD STOP."};
   return `<div class="alert warn">No STATUS frames: this STM32 runs firmware without the STATUS frame, so only TELEM is available. Flash the updated ObstacleLap.cpp for the full breakdown.</div>`+
     `<div class="now-title"><span class="st">${tm.state_name}</span><span class="ph">corner ${tm.corner_count}/12</span></div><p class="lead">${D[tm.state_name]||""}</p>`+
@@ -1084,7 +1081,6 @@ function describeTelemOnly(tm){
 function supPhase(t,ss){
   if(ss&&ss.no_avoid) return"DISABLED";
   if(t.note==="stm32 busy") return"PAUSED";
-  if(t.action===2) return"COMMIT";
   if(t.action===1) return"TRACK";
   if(t.note==="refractory") return"REFRACTORY";
   if(/^confirming/.test(t.note)) return"CONFIRMING";
@@ -1097,12 +1093,11 @@ function idleWhy(n){
   if(n==="no usable range") return"no lidar range at the pillar's bearing, or nearer than min_range (the chassis)";
   if(/outside the working cone/.test(n)) return"the pillar bearing is outside ±max_bearing";
   if(n==="no room on the legal side") return"wall guard: not enough room between the pillar and the wall — holding the lane (a penalty beats a crash)";
-  if(n==="leg complete") return"the committed leg ran out on odometry";
-  if(n==="leg timed out") return"the committed leg took over 5 s — dropped";
+  if(/^pillar out of view/.test(n)) return"the pillar left the frame for 3 ticks in a row — released instantly, no distance run out";
   return n;
 }
 function renderSup(d,t,tm,ss){
-  ["IDLE","CONFIRMING","TRACK","COMMIT","REFRACTORY","PAUSED","DISABLED"].forEach(n=>$("sc-"+n).classList.remove("cur"));
+  ["IDLE","CONFIRMING","TRACK","REFRACTORY","PAUSED","DISABLED"].forEach(n=>$("sc-"+n).classList.remove("cur"));
   if(!t){$("sup-meta").textContent="no session";$("sup-now").innerHTML=`<p class="note">Runs inside obstacle_lap's loop at 50 Hz once a session starts.</p>`;return;}
   const ph=supPhase(t,ss); $("sc-"+ph).classList.add("cur");
   const s=t.sup,c=ss.cfg,near=t.near;
@@ -1112,8 +1107,7 @@ function renderSup(d,t,tm,ss){
   else if(ph==="PAUSED") lead=`The STM32 is in ${tm.state_name}, which must not be interrupted: every frame carries action NONE. A manoeuvre that was running when this began was dropped, and re-arming then waits out a ${s.refractory_mm} mm refractory.`;
   else if(ph==="IDLE") lead=`Looking for the nearest RED/GREEN with a real range within ${c.engage} mm and ±${c.max_bearing}°. Now: ${esc(idleWhy(t.note))}.`;
   else if(ph==="CONFIRMING") lead=`Pillar seen and a manoeuvre solved, confirming ${s.confirm}/${s.confirm_ticks} ticks: one frame of a mis-classified colour must not start a manoeuvre.`;
-  else if(ph==="TRACK") lead=`Re-solving every tick and sending TRACK: hold ${sg(s.heading_abs)}° for ${Math.round(s.leg_mm)} mm (the STM32 re-bases the leg on every frame). Freezes to COMMIT at r_axis ≤ ${c.freeze} mm, or after ${s.lost_grace} missed detections (now ${s.lost}).`;
-  else if(ph==="COMMIT") lead=`Frozen: hold ${sg(s.heading_abs)}°; ${s.commit_left_mm} mm of the ${Math.round(s.leg_mm)} mm leg left (odometry from TELEM). Perception is not consulted. Gives up after ${s.commit_timeout_s} s (${s.commit_age_s} s so far).`;
+  else if(ph==="TRACK") lead=`Sending TRACK: hold ${sg(s.heading_abs)}°. Re-solved every tick while r_axis > ${c.freeze} mm; inside that the heading is held as-is and solve() only keeps checking for an already-clear or unusable-range release. Releases to NONE the instant the pillar is confirmed clear, or after ${s.lost_grace} missed detections (now ${s.lost}) — never on a distance or a timer.`;
   else if(ph==="REFRACTORY") lead=`Just finished a pass: re-arming is blocked for ${s.refractory_left_mm} mm more odometry (refractory ${s.refractory_mm} mm), so the pillar just passed cannot re-trigger.`;
   rows+=nrow(near?"info":"wait","Nearest candidate",near?`${near.color} @ ${sg(near.bearing_deg)}° · ${mm(near.distance_mm)} · r_axis ${near.distance_mm!=null?Math.round(near.distance_mm+c.pillar_half_width)+" mm":"—"}`:"none in range/cone");
   rows+=nrow("info","Solver note",esc(t.note||"—"));

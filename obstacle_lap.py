@@ -42,7 +42,7 @@ from main import fuse_with
 from control.percept_link import (PerceptLink, Telemetry, ST_HEADING, ST_BOOT,
                                   ST_FINISH, ST_STOPPED, CMD_NONE, CMD_RERUN,
                                   CMD_STOP, CMD_NAMES)
-from control.solver import AvoidCfg, AVOID_NONE, AVOID_TRACK, AVOID_COMMIT
+from control.solver import AvoidCfg, AVOID_NONE, AVOID_TRACK
 from control.supervisor import AvoidSupervisor
 
 SEND_HZ = 50
@@ -245,14 +245,15 @@ class ObstacleLap:
         cmd = CMD_NONE if self.dry else self._command(telem, t0)
 
         # ---- send -----------------------------------------------------------
-        # Silence is the failure signal: with no lidar the STM32 must see
-        # its feed go dead and fall back, not act on frozen distances. The
-        # one exception is a committed leg, which is odometry-terminated and
-        # needs no perception at all. A held command also goes out, but as a
-        # command-only frame (no ranges, LIDAR_OK clear), so it never makes a
-        # dead lidar look alive.
+        # Silence is the failure signal: with no lidar the STM32 must see its
+        # feed go dead and fall back, not steer on frozen distances. There is
+        # no odometry-terminated leg any more to except from this — TRACK
+        # holding a close-range heading still wants a live lidar, since it is
+        # the lidar that eventually says the pillar is clear or gone. A held
+        # command also goes out, but as a command-only frame (no ranges,
+        # LIDAR_OK clear), so it never makes a dead lidar look alive.
         sent = False
-        if lidar_live or action == AVOID_COMMIT:
+        if lidar_live:
             if not self.hello_sent and lidar_live and cam_live:
                 self.hello_sent = True
             if not self.dry:
@@ -385,7 +386,7 @@ def main():
 
 
 def _aname(a):
-    return {AVOID_NONE: "----", AVOID_TRACK: "TRCK", AVOID_COMMIT: "CMIT"}[a]
+    return {AVOID_NONE: "----", AVOID_TRACK: "TRCK"}.get(a, "????")
 
 
 if __name__ == "__main__":

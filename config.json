@@ -119,14 +119,5 @@
   },
   "min_blob_area": 300,
   "swap_rb": true,
-  "floor": {
-    "enabled": true,
-    "white_s_max": 70,
-    "white_v_min": 120,
-    "strip_px": 10,
-    "min_white_frac": 0.4,
-    "linked": true,
-    "dark_v_max": 50,
-    "ignore_bottom_px": 0
-  }
+  "camera_offset_deg": 5 
 }
