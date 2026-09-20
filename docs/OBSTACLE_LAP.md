@@ -181,13 +181,28 @@ across the field; if it grows toward the edges, re-run
 
 ### 4.4 HSV under venue light
 
-Hyderabad's hall lighting is not your workshop's. Run `dashboard.py`, put a red
-and a green pillar in frame at 0.3 m, 1 m and 2 m, and widen the `hsv` ranges
-until both hold solid at all three. Then check `min_blob_area` (300) still
-rejects the noise but keeps a pillar at 2 m — at 2 m a 50 mm pillar is small.
+Hyderabad's hall lighting is not your workshop's, and it is not even uniform
+across the mat — the same pillar reads a different HSV from different spots, so
+one threshold picked from one angle clips it elsewhere.
+
+Use the **eyedropper** on the Calibration tab for this. Pick the colour
+(Red / Green / Magenta), press **Pick from feed** (it switches to the Raw view
+and stays armed), then click that colour's pillar in the feed **from several
+positions on the mat** — near and far, and in the brightest and dimmest spots
+you expect. Each click adds a sample (shown as a chip) and widens the mask to
+span every sample so far, dropping the S/V floor to cover the dimmer views and
+stretching the hue window across the warmer/cooler ones; gross outliers (a
+stray floor pixel caught in a click) are trimmed so one bad click can't blow
+the band open. **Undo last** / **Clear** manage the samples; **Esc** or the
+button again stops. The sliders still show and fine-tune the result, and
+**Save to config.json** writes it as before. Then confirm `min_blob_area`
+(300) still rejects noise but keeps a pillar at 2 m — at 2 m a 50 mm pillar is
+small.
 
 **Do this again on competition day, in the competition hall.** It is the single
-most common reason a working obstacle round stops working at an event.
+most common reason a working obstacle round stops working at an event — and the
+multi-spot sampling is exactly what makes the mask survive the hall's uneven
+light.
 
 ### 4.4a Floor / pillar filter — only red and green that stand on the mat
 

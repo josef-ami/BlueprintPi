@@ -50,6 +50,9 @@
         pointer-events:none;opacity:0;transition:opacity .25s linear}
   .pick-marker.show{opacity:1}
   #pick[aria-pressed="true"]{background:var(--orange);border-color:var(--orange);color:#fff}
+  .samps{display:flex;flex-wrap:wrap;gap:4px}
+  .samp{width:22px;height:22px;padding:0;border:1px solid var(--rule);border-radius:4px;cursor:pointer}
+  .samp:hover{outline:2px solid var(--red);outline-offset:1px}
   .hint{color:var(--muted);font-size:13px;margin:10px 0 0}
 
   .swatches{display:flex;gap:6px;margin-bottom:14px}
@@ -270,11 +273,15 @@
         <button class="sw" data-c="GREEN" aria-pressed="false">Green</button>
         <button class="sw" data-c="MAGENTA" aria-pressed="false">Magenta</button>
       </div>
-      <div class="row" style="margin-bottom:10px">
+      <div class="row" style="margin-bottom:6px;justify-content:flex-start">
         <button id="pick" aria-pressed="false">Pick from feed</button>
-        <span class="hint" id="pick-hint" style="margin:0">Click, then click a pixel on the feed (switches to Raw) to set the selected colour's threshold from it.</span>
+        <button id="pick-undo" disabled>Undo last</button>
+        <button id="pick-clear" disabled>Clear</button>
       </div>
-      <div id="bands"></div>
+      <div class="samps" id="pick-samples"></div>
+      <div class="hint num" id="pick-count" style="margin:2px 0 0">No samples yet</div>
+      <span class="hint" id="pick-hint" style="display:block;margin:4px 0 0">Arm, then click the same obstacle from several spots — the mask widens to cover every sample.</span>
+      <div id="bands" style="margin-top:12px"></div>
       <div class="rng">
         <label for="hfov">Horizontal field of view <b><span id="hfov-v" class="num"></span>°</b></label>
         <input type="range" id="hfov" min="20" max="180" step="0.5">
@@ -768,20 +775,28 @@ document.getElementById("stream-toggle").addEventListener("click",async e=>{
 
 /* ---------- wiring ---------- */
 document.querySelectorAll(".tabs button").forEach(b=>{b.onclick=()=>{document.querySelectorAll(".tabs button").forEach(x=>x.setAttribute("aria-pressed",x===b));view=b.dataset.v;refreshFeed();};});
-document.querySelectorAll(".sw").forEach(b=>{b.onclick=()=>{document.querySelectorAll(".sw").forEach(x=>x.setAttribute("aria-pressed",x===b));colour=b.dataset.c;renderControls();refreshFeed();};});
+document.querySelectorAll(".sw").forEach(b=>{b.onclick=()=>{document.querySelectorAll(".sw").forEach(x=>x.setAttribute("aria-pressed",x===b));colour=b.dataset.c;renderControls();renderSampleChips();if(picking)armPicker();refreshFeed();};});
 document.getElementById("hfov").addEventListener("input",e=>{cfg.hfov_deg=+e.target.value;document.getElementById("hfov-v").textContent=e.target.value;pushLive();});
 document.getElementById("area").addEventListener("input",e=>{cfg.min_blob_area=+e.target.value;document.getElementById("area-v").textContent=e.target.value;pushLive();});
 document.getElementById("swap").addEventListener("change",e=>{cfg.swap_rb=e.target.checked;pushLive();});
 document.getElementById("fl-en").addEventListener("change",e=>{ensureFloor();cfg.floor.enabled=e.target.checked;pushLive();});
 document.getElementById("fl-link").addEventListener("change",e=>{ensureFloor();cfg.floor.linked=e.target.checked;pushLive();});
 
-/* ---------- colour picker: click a pixel on the feed to set a threshold ----------
-   Runs entirely client-side: draws the current (same-origin) <img id="feed">
-   frame to an offscreen canvas and reads pixels back, so it works on any
-   camera without a round trip to the Pi. Only meaningful on the Raw view
-   (mask/overlay/blobs/floor tint or dim pixels), so arming it forces that
-   view; picking restores whatever view was active before. */
+/* ---------- colour picker: sample a colour from several viewpoints ----------
+   The same pillar reads different HSV from different spots on the mat: the
+   lighting is uneven, so one threshold picked from one angle clips it
+   elsewhere. So picking ACCUMULATES. Arm it once (it stays armed), then click
+   the pillar from as many positions as you like — each click adds an 11x11
+   sample for the CURRENTLY SELECTED colour, and the threshold band is rebuilt
+   to span every sample (gross outliers trimmed), widening as you go. Samples
+   live only in the browser; only the resulting HSV bands go into cfg /
+   config.json. Runs fully client-side off the same-origin <img id="feed">, so
+   it needs no round trip to the Pi. Click the button again (or Esc) to stop.
+
+   pickSamples[colour] holds one entry per click: {px:[[r,g,b],...], rgb:mean}.
+   rebuildBands() flattens them and recomputes; removing a sample recomputes. */
 let picking=false, pickPrevView=null, pickCanvas=null;
+const pickSamples={RED:[],GREEN:[],MAGENTA:[]};
 
 function rgbToHsvDeg(r,g,b){
   /* Returns [hue in REAL degrees 0-360, S 0-255, V 0-255]. Hue is kept in
@@ -802,18 +817,64 @@ function percentile(sortedArr,p){
   const i=Math.min(sortedArr.length-1,Math.max(0,Math.round(p/100*(sortedArr.length-1))));
   return sortedArr[i];
 }
-function hueBands(hCv,half,sLo,vLo){
-  /* hCv/half in OpenCV's 0-179 hue units. Splits into two ranges when the
-     window crosses the 0/179 wrap, the same way the shipped RED band does
-     (real red sits right on that seam). */
-  half=Math.max(1,Math.round(half));
+function hueBandsDeg(centerDeg,halfDeg,sLo,vLo){
+  /* center/half in REAL degrees; convert to OpenCV 0-179 and split into two
+     ranges when the window crosses the 0/179 wrap, the same way the shipped
+     RED band does (real red sits right on that seam). */
   const cap=v=>Math.max(0,Math.min(255,Math.round(v)));
-  const lo=hCv-half, hi=hCv+half;
+  const c=Math.round((((centerDeg%360)+360)%360)/2);
+  const half=Math.min(45,Math.max(6,Math.round(halfDeg/2)+3));   // opencv units, padded, capped
+  const lo=c-half, hi=c+half;
   if(lo<0) return [[[0,cap(sLo),cap(vLo)],[Math.round(hi),255,255]],
                    [[Math.round(180+lo),cap(sLo),cap(vLo)],[179,255,255]]];
   if(hi>179) return [[[Math.round(lo),cap(sLo),cap(vLo)],[179,255,255]],
                      [[0,cap(sLo),cap(vLo)],[Math.round(hi-180),255,255]]];
   return [[[Math.round(lo),cap(sLo),cap(vLo)],[Math.round(hi),255,255]]];
+}
+function rebuildBands(col){
+  /* Rebuild cfg.hsv[col] to span every accumulated sample for col. */
+  const groups=pickSamples[col];
+  if(!groups.length) return null;
+  const hs=[],ss=[],vs=[];
+  for(const g of groups) for(const [r,gr,b] of g.px){
+    const [h,s,v]=rgbToHsvDeg(r,gr,b); hs.push(h); ss.push(s); vs.push(v);
+  }
+  // Circular mean hue (handles the 0/360 wrap that real red straddles).
+  let sumSin=0,sumCos=0;
+  for(const h of hs){const rad=h*Math.PI/180; sumSin+=Math.sin(rad); sumCos+=Math.cos(rad);}
+  let meanDeg=Math.atan2(sumSin,sumCos)*180/Math.PI; if(meanDeg<0) meanDeg+=360;
+  // Half-width = a high percentile of the per-pixel angular deviation, so a
+  // stray floor/edge pixel in one patch cannot blow the band wide open while
+  // genuine lighting spread across viewpoints still widens it.
+  const devs=hs.map(h=>{let d=Math.abs(h-meanDeg); return d>180?360-d:d;}).sort((a,b)=>a-b);
+  const halfDeg=percentile(devs,97);
+  ss.sort((a,b)=>a-b); vs.sort((a,b)=>a-b);
+  const sLo=Math.max(0,percentile(ss,5)-15), vLo=Math.max(0,percentile(vs,5)-15);
+  cfg.hsv[col]=hueBandsDeg(meanDeg,halfDeg,sLo,vLo);
+  renderControls(); pushLive();
+  return {cCv:Math.round(meanDeg/2), halfCv:Math.min(45,Math.max(6,Math.round(halfDeg/2)+3)),
+          sLo,vLo, n:groups.length};
+}
+function renderSampleChips(){
+  const groups=pickSamples[colour], n=groups.length;
+  const box=document.getElementById("pick-samples");
+  box.innerHTML=groups.map((g,i)=>
+    `<button class="samp" data-i="${i}" title="Remove this sample"
+       style="background:rgb(${g.rgb[0]},${g.rgb[1]},${g.rgb[2]})"></button>`).join("");
+  box.querySelectorAll(".samp").forEach(el=>{
+    el.onclick=()=>{ pickSamples[colour].splice(+el.dataset.i,1);
+      if(pickSamples[colour].length) rebuildBands(colour);
+      renderSampleChips(); updatePickCount(); };
+  });
+  document.getElementById("pick-undo").disabled=!n;
+  document.getElementById("pick-clear").disabled=!n;
+  updatePickCount();
+}
+function updatePickCount(){
+  const n=pickSamples[colour].length;
+  document.getElementById("pick-count").textContent=
+    n? `${n} sample${n>1?"s":""} of ${colour} — mask spans them all`
+     : `No ${colour} samples yet`;
 }
 function setTabsView(v){
   view=v;
@@ -823,20 +884,33 @@ function setTabsView(v){
 function armPicker(){
   picking=true; pickPrevView=view;
   document.getElementById("pick").setAttribute("aria-pressed","true");
+  document.getElementById("pick").textContent="Picking… (Esc to stop)";
   document.getElementById("feedwrap").classList.add("picking");
-  document.getElementById("pick-hint").textContent="Click a pixel on the pillar in the feed below.";
+  document.getElementById("pick-hint").textContent=
+    `Click ${colour} in the feed from several spots on the mat — each click widens the mask.`;
   if(view!=="raw") setTabsView("raw");
 }
 function disarmPicker(restore){
   picking=false;
   document.getElementById("pick").setAttribute("aria-pressed","false");
+  document.getElementById("pick").textContent="Pick from feed";
   document.getElementById("feedwrap").classList.remove("picking");
   document.getElementById("pick-hint").textContent=
-    "Click, then click a pixel on the feed (switches to Raw) to set the selected colour's threshold from it.";
+    "Arm, then click the same obstacle from several spots — the mask widens to cover every sample.";
   if(restore && pickPrevView && pickPrevView!==view) setTabsView(pickPrevView);
   pickPrevView=null;
 }
 document.getElementById("pick").addEventListener("click",()=>{picking?disarmPicker(true):armPicker();});
+document.getElementById("pick-undo").addEventListener("click",()=>{
+  pickSamples[colour].pop();
+  if(pickSamples[colour].length) rebuildBands(colour);
+  renderSampleChips();
+});
+document.getElementById("pick-clear").addEventListener("click",()=>{
+  pickSamples[colour]=[];
+  renderSampleChips();
+});
+document.addEventListener("keydown",e=>{ if(e.key==="Escape" && picking) disarmPicker(true); });
 document.getElementById("feed").addEventListener("click",e=>{
   if(!picking) return;
   const img=e.target, rect=img.getBoundingClientRect(), hint=document.getElementById("pick-hint");
@@ -854,35 +928,24 @@ document.getElementById("feed").addEventListener("click",e=>{
     data=ctx.getImageData(x0,y0,w,h).data;
   }catch(err){hint.textContent="Could not read the feed pixels in this browser.";return;}
 
-  const hs=[],ss=[],vs=[];let rs=0,gs=0,bs=0,n=0;
+  const px=[]; let rs=0,gs=0,bs=0,n=0;
   for(let i=0;i<data.length;i+=4){
-    const [hh,s,v]=rgbToHsvDeg(data[i],data[i+1],data[i+2]);
-    hs.push(hh); ss.push(s); vs.push(v);
+    px.push([data[i],data[i+1],data[i+2]]);
     rs+=data[i]; gs+=data[i+1]; bs+=data[i+2]; n++;
   }
-  // Circular mean/spread for hue: a solid red patch straddles the 0/360
-  // (OpenCV 0/179) wrap, and a plain min/max would read that as almost the
-  // full hue range instead of a tight band around real red.
-  let sumSin=0,sumCos=0;
-  for(const hh of hs){const r=hh*Math.PI/180; sumSin+=Math.sin(r); sumCos+=Math.cos(r);}
-  let meanDeg=Math.atan2(sumSin,sumCos)*180/Math.PI; if(meanDeg<0) meanDeg+=360;
-  let maxDiff=0;
-  for(const hh of hs){let d=Math.abs(hh-meanDeg); if(d>180) d=360-d; if(d>maxDiff) maxDiff=d;}
-  const meanCv=Math.min(179,Math.round(meanDeg/2));
-  const halfCv=Math.min(30,Math.max(6,Math.round(maxDiff/2)+3));       // a little pad either side
-  ss.sort((a,b)=>a-b); vs.sort((a,b)=>a-b);
-  const sLo=Math.max(0,percentile(ss,10)-15), vLo=Math.max(0,percentile(vs,10)-15);
-
-  cfg.hsv[colour]=hueBands(meanCv,halfCv,sLo,vLo);
-  renderControls(); pushLive();
-  hint.innerHTML=`Picked H ${meanCv}±${halfCv} · S ≥ ${sLo} · V ≥ ${vLo} for <b>${colour}</b>. Fine-tune below if needed.`;
+  const rgb=[Math.round(rs/n),Math.round(gs/n),Math.round(bs/n)];
+  pickSamples[colour].push({px,rgb});
+  const info=rebuildBands(colour);
+  renderSampleChips();
+  hint.innerHTML=`Sample ${info.n} of <b>${colour}</b> added → H ${info.cCv}±${info.halfCv} · `
+    +`S ≥ ${info.sLo} · V ≥ ${info.vLo}. Keep sampling other spots, or press Esc.`;
 
   const marker=document.getElementById("pick-marker");
   marker.style.left=(e.clientX-rect.left)+"px"; marker.style.top=(e.clientY-rect.top)+"px";
-  marker.style.background=`rgb(${Math.round(rs/n)},${Math.round(gs/n)},${Math.round(bs/n)})`;
+  marker.style.background=`rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
   marker.classList.add("show");
-  clearTimeout(marker._t); marker._t=setTimeout(()=>marker.classList.remove("show"),1800);
-  disarmPicker(true);
+  clearTimeout(marker._t); marker._t=setTimeout(()=>marker.classList.remove("show"),1600);
+  // stays armed: the next click adds another viewpoint.
 });
 document.getElementById("save").onclick=async()=>{const b=document.getElementById("save");const r=await(await fetch("/api/save",{method:"POST"})).json();if(r.ok){b.disabled=true;b.textContent="Saved — restart main.py";}else{b.textContent="Save failed: "+r.error;}};
 document.getElementById("revert").onclick=async()=>{const r=await(await fetch("/api/config")).json();cfg=r.saved;renderControls();pushLive();};
@@ -1322,7 +1385,7 @@ pollRun();
 (async function init(){
   const r=await(await fetch("/api/config")).json();
   cfg=r.live;if(!cfg.fusion)cfg.fusion={};
-  renderControls();if(calOn())refreshFeed();poll();pollRaw();pollBearings();pollStream();
+  renderControls();renderSampleChips();if(calOn())refreshFeed();poll();pollRaw();pollBearings();pollStream();
   document.getElementById("save").disabled=true;document.getElementById("save").textContent="Saved";
 })();
 </script>
