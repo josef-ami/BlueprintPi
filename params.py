@@ -1,0 +1,403 @@
+#!/usr/bin/env python3
+"""
+params.py - the single place that knows what is tunable, on the Pi and on the
+STM32, and the only thing that writes tuning.json.
+
+There are two halves and they are deliberately different:
+
+  PiParams    values this process reads directly every frame (HSV ranges, the
+              pillar filter, the cone fit, the LiDAR candidate search). Setting
+              one takes effect on the next frame - nothing is restarted, and
+              the camera and LiDAR threads are never touched.
+
+  StmParams   a MIRROR of the firmware's table. The firmware owns no storage:
+              it boots with its compiled-in defaults and announces a new boot
+              id, and this side pushes the whole saved set over the serial link
+              it is already using for sensor frames. A mid-race STM32 reset
+              therefore re-tunes itself within a few hundred ms instead of
+              silently running defaults.
+
+Nothing here blocks. Pushes are queued and drained a few per loop by whoever
+owns the serial port, so a tuning change can never stall the 50 Hz frame feed.
+
+Readers are lock-free: values live in one dict that is REPLACED, never mutated,
+so a reader either sees the whole old set or the whole new one.
+"""
+
+import json
+import os
+import queue
+import threading
+
+TUNING_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tuning.json")
+
+
+# --------------------------------------------------------------------------
+# spec
+# --------------------------------------------------------------------------
+
+class Spec:
+    """One tunable: name, default, range, how to show it."""
+
+    __slots__ = ("name", "default", "lo", "hi", "kind", "group", "help")
+
+    def __init__(self, name, default, lo, hi, group, kind="f", help=""):
+        self.name, self.default = name, default
+        self.lo, self.hi = lo, hi
+        self.kind = kind              # f float | i int | b bool
+        self.group, self.help = group, help
+
+    def coerce(self, v):
+        """Value -> correct type, clamped. Raises ValueError on junk."""
+        if self.kind == "b":
+            if isinstance(v, str):
+                v = v.strip().lower() in ("1", "true", "yes", "on")
+            return bool(v)
+        v = float(v)
+        if v != v:                    # NaN
+            raise ValueError("not a number")
+        v = max(self.lo, min(self.hi, v))
+        return int(round(v)) if self.kind == "i" else v
+
+    def as_dict(self, value):
+        return {"name": self.name, "value": value, "default": self.default,
+                "lo": self.lo, "hi": self.hi, "kind": self.kind,
+                "group": self.group, "help": self.help}
+
+
+# --------------------------------------------------------------------------
+# Pi-side tunables
+# --------------------------------------------------------------------------
+#
+# Groups are only how the page lays them out.
+#   camera   frame handling and the camera model
+#   hsv      colour ranges (the thing that actually needs tuning on the day)
+#   filter   the "is this blob really a pillar" tests
+#   cone     the 45 deg wall fits that give lane offset and wall angle
+#   locate   turning a camera bearing + LiDAR range into a pillar position
+#   cand     LiDAR-only objects whose colour is not known yet
+#   link     serial framing
+
+PI_SPECS = [
+    # ---- camera ----
+    Spec("MIN_AREA_PROC", 250, 20, 5000, "camera", "i",
+         "smallest blob (in 320x240 px) that counts as a pillar"),
+    Spec("VISION_STALE_S", 0.2, 0.05, 2.0, "camera", "f",
+         "no camera frame for this long -> colour is sent as none"),
+    Spec("JPEG_QUALITY", 50, 10, 95, "camera", "i", "preview stream quality"),
+    Spec("CAMERA_FWD_MM", 0.0, -200, 400, "camera", "f",
+         "camera ahead of the LiDAR; yours sits above it, so 0"),
+    Spec("CAMERA_OFFSET_DEG", 5.0, -30, 30, "camera", "f",
+         "camera-to-LiDAR rotational alignment"),
+    Spec("HFOV_DEG", 160.0, 40, 200, "camera", "f",
+         "lens horizontal field of view, used by the equidistant model"),
+    Spec("USE_INTRINSICS", True, 0, 1, "camera", "b",
+         "bearing from the calibrated fisheye K/D (off = equidistant HFOV_DEG). "
+         "Your K says +/-48 deg; hfov_deg says +/-80. Measure before trusting either"),
+    Spec("SWAP_RB", True, 0, 1, "camera", "b", "swap red and blue channels"),
+
+    # ---- HSV ----
+    Spec("RED1_H_LO",   0, 0, 180, "hsv", "i", "red range 1"),
+    Spec("RED1_S_LO", 120, 0, 255, "hsv", "i", ""),
+    Spec("RED1_V_LO",  70, 0, 255, "hsv", "i", ""),
+    Spec("RED1_H_HI",  10, 0, 180, "hsv", "i", ""),
+    Spec("RED1_S_HI", 255, 0, 255, "hsv", "i", ""),
+    Spec("RED1_V_HI", 255, 0, 255, "hsv", "i", ""),
+    Spec("RED2_H_LO", 170, 0, 180, "hsv", "i", "red range 2 (hue wraps)"),
+    Spec("RED2_S_LO", 120, 0, 255, "hsv", "i", ""),
+    Spec("RED2_V_LO",  70, 0, 255, "hsv", "i", ""),
+    Spec("RED2_H_HI", 180, 0, 180, "hsv", "i", ""),
+    Spec("RED2_S_HI", 255, 0, 255, "hsv", "i", ""),
+    Spec("RED2_V_HI", 255, 0, 255, "hsv", "i", ""),
+    Spec("GREEN_H_LO", 40, 0, 180, "hsv", "i", "green range"),
+    Spec("GREEN_S_LO", 80, 0, 255, "hsv", "i", ""),
+    Spec("GREEN_V_LO", 60, 0, 255, "hsv", "i", ""),
+    Spec("GREEN_H_HI", 85, 0, 180, "hsv", "i", ""),
+    Spec("GREEN_S_HI", 255, 0, 255, "hsv", "i", ""),
+    Spec("GREEN_V_HI", 255, 0, 255, "hsv", "i", ""),
+
+    # ---- pillar filter ----
+    Spec("floor_s_max", 60, 0, 255, "filter", "i", "mat: saturation at or below this"),
+    Spec("floor_v_min", 120, 0, 255, "filter", "i", "... and value at or above this"),
+    Spec("strip_px", 6, 1, 40, "filter", "i", "rows checked just under a blob"),
+    Spec("floor_below_min", 0.45, 0.0, 1.0, "filter", "f",
+         "fraction of that strip that must be mat"),
+    Spec("aspect_min", 0.8, 0.0, 5.0, "filter", "f", "height / width"),
+    Spec("solidity_min", 0.5, 0.0, 1.0, "filter", "f", "contour area / bbox area"),
+    Spec("contrast_s_min", 50, 0, 255, "filter", "i",
+         "blob saturation minus mat saturation under it"),
+    Spec("bottom_margin_px", 3, 0, 40, "filter", "i",
+         "this close to the image bottom = base out of view, skip the floor tests"),
+
+    # ---- cone wall fit ----
+    Spec("CONE_DEG", 45, 10, 120, "cone", "i", "width of each side cone"),
+    Spec("CONE_MAX_RANGE_MM", 1500, 300, 4000, "cone", "i", ""),
+    Spec("CONE_MIN_RANGE_MM", 60, 10, 500, "cone", "i", ""),
+    Spec("CONE_INLIER_MM", 25, 3, 200, "cone", "i", "RANSAC inlier band"),
+    Spec("CONE_MIN_INLIERS", 8, 3, 60, "cone", "i", ""),
+    Spec("CONE_MIN_SPAN_MM", 150, 20, 800, "cone", "i",
+         "wall length the fit must cover; a 50 mm pillar face cannot"),
+    Spec("CONE_AGREE_DEG", 6.0, 0.5, 45.0, "cone", "f",
+         "left/right yaw must agree this well to be averaged"),
+
+    # ---- pillar location ----
+    Spec("RAY_WINDOW_DEG", 8.0, 1.0, 30.0, "locate", "f",
+         "LiDAR returns this close to the camera ray are candidates"),
+    Spec("PILLAR_MAX_MM", 2000.0, 300, 4000, "locate", "f", ""),
+    Spec("AREA_K", 14000.0, 2000, 60000, "locate", "f",
+         "distance ~ AREA_K / sqrt(area), the fallback when no LiDAR return agrees"),
+    Spec("FACE_TO_CENTRE_MM", 25.0, 0, 100, "locate", "f",
+         "half a pillar: LiDAR sees the face, the planner wants the centre"),
+
+    # ---- LiDAR-only candidates ----
+    Spec("CORRIDOR_MM", 1000.0, 300, 2000, "cand", "f", ""),
+    Spec("CAND_MAX_MM", 1800.0, 300, 4000, "cand", "f", ""),
+    Spec("CAND_WALL_MM", 70.0, 0, 400, "cand", "f", "keep this clear of a fitted wall"),
+    Spec("CAND_GAP_MM", 60.0, 10, 400, "cand", "f", "split clusters at this gap"),
+    Spec("CAND_MAX_WIDTH_MM", 120.0, 40, 600, "cand", "f",
+         "wider than this is a wall run, not a pillar"),
+    Spec("CAND_MIN_POINTS", 2, 1, 30, "cand", "i", ""),
+
+    # ---- link ----
+    Spec("SEND_HZ", 50, 5, 200, "link", "i", "sensor frames per second"),
+    Spec("CMD_REPEAT", 3, 1, 10, "link", "i", "copies of each START/STOP press"),
+    Spec("BEARING_TOL_DEG", 2, 0, 15, "link", "i",
+         "+/- degrees when picking the 0/90/270 beams"),
+    Spec("STM_PUSH_PER_LOOP", 4, 1, 40, "link", "i",
+         "tuning lines sent to the STM32 per loop; keep well under SEND_HZ budget"),
+]
+
+
+class PiParams:
+    """Lock-free for readers: p['NAME']. Writers swap the whole dict."""
+
+    def __init__(self, specs):
+        self.specs = {s.name: s for s in specs}
+        self.order = [s.name for s in specs]
+        self._vals = {s.name: s.default for s in specs}
+
+    def __getitem__(self, name):
+        return self._vals[name]
+
+    def get(self, name, default=None):
+        return self._vals.get(name, default)
+
+    def snapshot(self):
+        return self._vals
+
+    def set(self, name, value):
+        """Returns the stored value. Raises KeyError / ValueError."""
+        spec = self.specs[name]
+        v = spec.coerce(value)
+        new = dict(self._vals)
+        new[name] = v
+        self._vals = new            # atomic swap; readers never see a half-set
+        return v
+
+    def set_many(self, mapping):
+        new = dict(self._vals)
+        out = {}
+        for name, value in mapping.items():
+            if name not in self.specs:
+                continue
+            out[name] = new[name] = self.specs[name].coerce(value)
+        self._vals = new
+        return out
+
+    def reset(self):
+        self._vals = {n: self.specs[n].default for n in self.order}
+
+    def describe(self):
+        return [self.specs[n].as_dict(self._vals[n]) for n in self.order]
+
+    # ---- derived views the hot loop wants ready-made ----
+    def hsv_config(self):
+        p = self._vals
+        return {
+            "RED": [[[p["RED1_H_LO"], p["RED1_S_LO"], p["RED1_V_LO"]],
+                     [p["RED1_H_HI"], p["RED1_S_HI"], p["RED1_V_HI"]]],
+                    [[p["RED2_H_LO"], p["RED2_S_LO"], p["RED2_V_LO"]],
+                     [p["RED2_H_HI"], p["RED2_S_HI"], p["RED2_V_HI"]]]],
+            "GREEN": [[[p["GREEN_H_LO"], p["GREEN_S_LO"], p["GREEN_V_LO"]],
+                       [p["GREEN_H_HI"], p["GREEN_S_HI"], p["GREEN_V_HI"]]]],
+        }
+
+    def pillar_filter(self):
+        p = self._vals
+        return {k: p[k] for k in ("floor_s_max", "floor_v_min", "strip_px",
+                                  "floor_below_min", "aspect_min", "solidity_min",
+                                  "contrast_s_min", "bottom_margin_px")}
+
+
+# --------------------------------------------------------------------------
+# STM32 mirror
+# --------------------------------------------------------------------------
+
+class StmParams:
+    """Mirror of the firmware's table, plus the push queue.
+
+    The firmware is the authority on what EXISTS (names, ids, ranges, groups);
+    this side is the authority on what the VALUES should be. `desired` is what
+    tuning.json says; `live` is what the firmware last acknowledged. When they
+    differ the name is queued for a push.
+    """
+
+    def __init__(self):
+        self.table = {}          # name -> {id, kind, lo, hi, group}
+        self.by_id = {}
+        self.live = {}           # name -> value the firmware confirmed
+        self.desired = {}        # name -> value we want
+        self.version = None
+        self.count = None
+        self.boot = None
+        self.synced = False      # a full dump has been received
+        self.pending = queue.Queue()
+        self._lock = threading.Lock()
+
+    # ---- incoming firmware lines ----
+    def on_line(self, line):
+        """Handle one '!' line. Returns a note for the log, or None."""
+        if line.startswith("!P "):
+            try:
+                _, pid, name, kind, val, lo, hi, group = line.split()
+            except ValueError:
+                return None
+            with self._lock:
+                self.table[name] = {"id": int(pid), "kind": int(kind),
+                                    "lo": float(lo), "hi": float(hi),
+                                    "group": int(group)}
+                self.by_id[int(pid)] = name
+                self.live[name] = float(val)
+                if name not in self.desired:
+                    self.desired[name] = float(val)   # adopt the firmware default
+                if self.count and len(self.table) >= self.count:
+                    self.synced = True
+            return None
+
+        if line.startswith("!p "):
+            try:
+                _, pid, val = line.split()
+            except ValueError:
+                return None
+            name = self.by_id.get(int(pid))
+            if name:
+                with self._lock:
+                    self.live[name] = float(val)
+            return None
+
+        if line.startswith("!V "):
+            try:
+                _, ver, count, boot = line.split()
+            except ValueError:
+                return None
+            new_boot = (self.boot is not None and boot != self.boot)
+            self.version, self.count, self.boot = ver, int(count), boot
+            if new_boot or not self.table:
+                # The firmware restarted (or we have never seen it). Its table
+                # is back at compiled-in defaults, so ask for it and re-push.
+                with self._lock:
+                    self.synced = False
+                    self.table.clear(); self.by_id.clear(); self.live.clear()
+                self.request_dump()
+                return f"[pi] STM32 boot {boot} - re-reading and re-pushing tuning"
+            return None
+
+        if line.startswith("!E"):
+            return "[pi] STM32 rejected a tuning line: " + line
+        return None
+
+    # ---- outgoing ----
+    def request_dump(self):
+        self.pending.put("?P")
+
+    def queue_all(self):
+        """Push every desired value that the firmware does not already have."""
+        with self._lock:
+            names = [n for n in self.table if n in self.desired]
+        for n in names:
+            self._queue_if_stale(n)
+
+    def _queue_if_stale(self, name):
+        want = self.desired.get(name)
+        have = self.live.get(name)
+        if want is None:
+            return
+        if have is None or abs(float(have) - float(want)) > 1e-6:
+            self.pending.put(f"N {name} {want:.6g}")
+
+    def set(self, name, value):
+        """Returns the coerced value. Raises KeyError / ValueError."""
+        meta = self.table.get(name)
+        if meta is None:
+            raise KeyError(name)
+        v = float(value)
+        if v != v:
+            raise ValueError("not a number")
+        v = max(meta["lo"], min(meta["hi"], v))
+        if meta["kind"] in (1, 2, 3, 4, 5):      # int-ish / bool
+            v = float(round(v))
+        with self._lock:
+            self.desired[name] = v
+        self.pending.put(f"N {name} {v:.6g}")
+        return v
+
+    def reset(self):
+        """Back to the firmware's own defaults: forget desired, re-read."""
+        with self._lock:
+            self.desired = dict(self.live)
+        self.request_dump()
+
+    def drain(self, n):
+        """Up to n queued lines, for the serial owner to write. Never blocks."""
+        out = []
+        for _ in range(n):
+            try:
+                out.append(self.pending.get_nowait())
+            except queue.Empty:
+                break
+        return out
+
+    def describe(self):
+        with self._lock:
+            rows = []
+            for name, meta in self.table.items():
+                rows.append({"name": name, "value": self.desired.get(name, meta and 0),
+                             "live": self.live.get(name), "lo": meta["lo"],
+                             "hi": meta["hi"],
+                             "kind": "b" if meta["kind"] == 5 else
+                                     ("f" if meta["kind"] == 0 else "i"),
+                             "group": meta["group"], "id": meta["id"]})
+        rows.sort(key=lambda r: r["id"])
+        return rows
+
+
+STM_GROUPS = ["drive", "turn", "planner", "passing", "levelling",
+              "3-point", "corner exit", "safety", "link"]
+
+
+# --------------------------------------------------------------------------
+# persistence - one file, both halves
+# --------------------------------------------------------------------------
+
+def load(pi: PiParams, stm: StmParams, path=TUNING_PATH):
+    """Returns a note for the log."""
+    try:
+        with open(path) as f:
+            saved = json.load(f)
+    except (OSError, ValueError) as e:
+        return f"[pi] no saved tuning ({type(e).__name__}) - using defaults"
+    n_pi = len(pi.set_many(saved.get("pi", {})))
+    stm.desired.update({k: float(v) for k, v in saved.get("stm32", {}).items()})
+    return f"[pi] loaded tuning: {n_pi} Pi, {len(saved.get('stm32', {}))} STM32"
+
+
+def save(pi: PiParams, stm: StmParams, path=TUNING_PATH):
+    """Atomic: write a temp file and rename, so a power cut cannot truncate it."""
+    data = {"pi": pi.snapshot(), "stm32": dict(stm.desired)}
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2, sort_keys=True)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+    return f"[pi] saved tuning to {os.path.basename(path)}"
