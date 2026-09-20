@@ -53,6 +53,13 @@ Wire frame - one ASCII line per send, SEND_HZ times a second:
                     that ray; 32767 = none
   uX / uY           nearest LiDAR object inside the corridor that is NOT the
                     camera's pillar (colour unknown yet); 32767 = none
+  sColor            SECOND pillar's colour - the next-largest accepted blob,
+                    i.e. one that is further away but still seen. 2 = none
+  sX / sY           where it is, same frame as pX/pY. Approaching a corner this
+                    is almost always the first pillar of the NEXT straight, and
+                    the firmware shapes the corner from its colour: green means
+                    go further forward and take it wide, red means turn early
+                    and take it short.
 
 Commands on the same serial line:
     S            START            X            STOP
@@ -184,13 +191,15 @@ sync_globals()
 
 lock = threading.Lock()
 vision = {"color": COL_NONE, "err": 0, "area": 0, "seq": 0, "t": 0.0,
-          "box": None, "bearing": None}          # box in 640x480 px, for the overlay
+          "box": None, "bearing": None,          # box in 640x480 px, for the overlay
+          "s_color": COL_NONE, "s_area": 0, "s_box": None, "s_bearing": None}
 latest_frame = None                              # RGB, only kept while someone watches
 viewers = 0
 
 link = {"line": "", "t": 0.0, "live": False, "serial_ok": False,
         "f": None, "l": None, "r": None, "cl": None, "cr": None,
-        "yaw": None, "pxy": None, "uxy": None, "hz": 0.0}
+        "yaw": None, "pxy": None, "uxy": None, "sxy": None,
+        "s_name": "none", "hz": 0.0}
 stm_log = collections.deque(maxlen=LOG_LINES)
 stm_state = {"state": "waiting for STM32", "corner": "", "exit": "", "lane": ""}
 commands = queue.Queue()                          # written to serial by the main loop only
@@ -368,11 +377,19 @@ def check_pillar(cnt, area, hsv, lab, floor, pf):
 
 
 def find_pillars(hsv, lab, pf):
-    """(best, candidates, floor). best = (cnt, area, code) of the largest
-    ACCEPTED blob or None; candidates = [(cnt, area, code, reject_or_None)]
-    for the debug overlay."""
+    """(accepted, candidates, floor).
+
+    accepted = every blob that passed, as (cnt, area, code), LARGEST FIRST.
+    The firmware wants two of them: the nearest pillar to steer around, and the
+    next one back. On the run up to a corner that second pillar is almost
+    always the first pillar of the next straight, and its colour is what decides
+    whether the corner is taken short or wide - see planCornerExit() in the
+    firmware. Sending only the largest blob, as this did before, made that
+    pillar invisible exactly when it mattered.
+
+    candidates = [(cnt, area, code, reject_or_None)] for the debug overlay."""
     floor = floor_mask(hsv, lab, pf)
-    cands, best = [], None
+    cands, accepted = [], []
     for name in ("RED", "GREEN"):
         cnts, _ = cv2.findContours(colour_mask(hsv, lab, name),
                                    cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -382,9 +399,10 @@ def find_pillars(hsv, lab, pf):
                 continue
             why = check_pillar(c, a, hsv, lab, floor, pf)
             cands.append((c, a, CODE[name], why))
-            if why is None and (best is None or a > best[1]):
-                best = (c, a, CODE[name])
-    return best, cands, floor
+            if why is None:
+                accepted.append((c, a, CODE[name]))
+    accepted.sort(key=lambda t: -t[1])
+    return accepted, cands, floor
 
 
 class VisionThread(threading.Thread):
@@ -421,22 +439,33 @@ class VisionThread(threading.Thread):
                 small = cv2.resize(frame, PROC_SIZE, interpolation=cv2.INTER_AREA)
                 hsv, lab = colour_spaces(small)
 
-                best, cands, floor = find_pillars(hsv, lab, pf)
+                accepted, cands, floor = find_pillars(hsv, lab, pf)
+
+                def describe(hit):
+                    cnt, area, colour = hit
+                    x, y, w, h = cv2.boundingRect(cnt)
+                    return (colour,
+                            int((x + w / 2.0) * sx) - centre,
+                            int(area),
+                            (int(x * sx), int(y * sy),
+                             int((x + w) * sx), int((y + h) * sy)),
+                            bearing_from_px((x + w / 2.0) * sx, (y + h / 2.0) * sy))
 
                 seq = (seq + 1) & 0xFFFFFFFF
-                if best is None:
+                if not accepted:
                     color, err, area, box, bearing = COL_NONE, 0, 0, None, None
                 else:
-                    cnt, area, color = best
-                    x, y, w, h = cv2.boundingRect(cnt)
-                    err = int((x + w / 2.0) * sx) - centre
-                    box = (int(x * sx), int(y * sy),
-                           int((x + w) * sx), int((y + h) * sy))
-                    bearing = bearing_from_px((x + w / 2.0) * sx, (y + h / 2.0) * sy)
+                    color, err, area, box, bearing = describe(accepted[0])
+                if len(accepted) > 1:
+                    s_color, _, s_area, s_box, s_bearing = describe(accepted[1])
+                else:
+                    s_color, s_area, s_box, s_bearing = COL_NONE, 0, None, None
 
                 with lock:
                     vision.update(color=color, err=err, area=int(area),
-                                  seq=seq, t=time.monotonic(), box=box, bearing=bearing)
+                                  seq=seq, t=time.monotonic(), box=box, bearing=bearing,
+                                  s_color=s_color, s_area=s_area, s_box=s_box,
+                                  s_bearing=s_bearing)
                     if viewers > 0:
                         latest_frame = frame
                         vision["cands"] = [
@@ -460,6 +489,7 @@ def vision_now(now):
         v = dict(vision)
     if now - v["t"] > VISION_STALE_S:
         v["color"], v["err"], v["area"], v["bearing"] = COL_NONE, 0, 0, None
+        v["s_color"], v["s_area"], v["s_bearing"] = COL_NONE, 0, None
     return v
 
 
@@ -888,6 +918,8 @@ async function tick(){
    `L ${f(r.left)} &nbsp;F ${f(r.front)} &nbsp;R ${f(r.right)} mm<br>`+
    `cone L ${f(r.cone_left)} &nbsp;R ${f(r.cone_right)} mm &nbsp;yaw ${r.wall_yaw===null?'--':r.wall_yaw+'°'}<br>`+
    `pillar <b>${r.name}</b> err ${r.error} area ${r.area}`+
+   (r.second&&r.second!=='none'?` &nbsp;<span class=dim>2nd</span> <b>${r.second}</b>`+
+     (r.second_xy?` at ${r.second_xy[0]},${r.second_xy[1]}`:''):'')+
    (r.pillar_xy?` &nbsp;at ${r.pillar_xy[0]} fwd, ${r.pillar_xy[1]} left mm`:'')+
    (r.unknown_xy?`<br>lidar object (colour unknown) ${r.unknown_xy[0]} fwd, ${r.unknown_xy[1]} left mm`:'');
   const lg=$('log'), atBottom=lg.scrollTop+lg.clientHeight>=lg.scrollHeight-5;
@@ -899,6 +931,7 @@ async function tick(){
     rows($('telVis'),[['colour',r.name],['err',r.error+' px'],['area',r.area],
       ['frame seq',r.vseq],
       ['pillar x,y',r.pillar_xy?r.pillar_xy.join(', ')+' mm':'--'],
+      ['2nd pillar',r.second+(r.second_xy?' at '+r.second_xy.join(', ')+' mm':'')],
       ['unknown x,y',r.unknown_xy?r.unknown_xy.join(', ')+' mm':'--']]);
     rows($('telLink'),[['lidar',r.lidar_live?'live':'STALE'],['serial',r.serial_ok?'open':'closed'],
       ['frame rate',r.hz.toFixed(1)+' Hz'],['front/left/right',
@@ -936,6 +969,9 @@ def status():
                      [round(link["pxy"][0]), round(link["pxy"][1])],
         "unknown_xy": None if link.get("uxy") is None else
                       [round(link["uxy"][0]), round(link["uxy"][1])],
+        "second": link.get("s_name", "none"),
+        "second_xy": None if link.get("sxy") is None else
+                     [round(link["sxy"][0]), round(link["sxy"][1])],
         "lidar_live": link["live"], "serial_ok": link["serial_ok"], "hz": link["hz"],
         "last_line": link["line"].strip(),
         "stm32_state": stm_state["state"], "corner": stm_state["corner"],
@@ -1176,15 +1212,20 @@ def main():
                 pxy = (locate_pillar(lidar._ranges, v["bearing"], v["area"])
                        if v["color"] != COL_NONE else None)
                 pX, pY = _pxy(pxy)
+                sxy = (locate_pillar(lidar._ranges, v["s_bearing"], v["s_area"])
+                       if v["s_color"] != COL_NONE else None)
+                sX, sY = _pxy(sxy)
                 uxy = unclassified(cands, pxy)
                 uX, uY = _pxy(uxy)
                 line = (f"{_u16(l)},{_u16(f)},{_u16(r)},{lidar.rev},"
                         f"{v['color']},{v['err']},{v['area']},{v['seq']},"
-                        f"{_cone_u16(cl)},{_cone_u16(cr)},{_ang(yaw)},{pX},{pY},{uX},{uY}\n")
+                        f"{_cone_u16(cl)},{_cone_u16(cr)},{_ang(yaw)},{pX},{pY},{uX},{uY},"
+                        f"{v['s_color']},{sX},{sY}\n")
                 if write(line.encode("ascii")):
                     frames += 1
                 link.update(line=line, t=now, f=f, l=l, r=r, cl=cl, cr=cr,
-                            yaw=yaw, pxy=pxy, uxy=uxy)
+                            yaw=yaw, pxy=pxy, uxy=uxy, sxy=sxy,
+                            s_name=NAMES[v["s_color"]])
             if live != was_live:
                 note("[obstacle] lidar LIVE - streaming" if live else
                      "[obstacle] lidar STALE - silent")
