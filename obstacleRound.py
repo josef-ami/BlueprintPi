@@ -126,7 +126,7 @@ PI = prm.PiParams(prm.PI_SPECS)
 STM = prm.StmParams()
 
 _MIRRORED = [s.name for s in prm.PI_SPECS
-             if s.group in ("camera", "cone", "locate", "cand", "link")]
+             if s.group in ("camera", "cone", "locate", "cand", "link", "lab")]
 
 # defaults, so the names exist before the first sync
 MIN_AREA_PROC = 250
@@ -159,7 +159,13 @@ CMD_REPEAT = 3
 BEARING_TOL_DEG = 2
 STM_PUSH_PER_LOOP = 4
 
+USE_LAB = False
+FLOOR_L_MIN = 120
+FLOOR_AB_TOL = 14
+LAB_CHROMA_MIN = 20
+
 HSV_CFG = PI.hsv_config()
+LAB_CFG = PI.lab_config()
 PILLAR_FILTER = PI.pillar_filter()
 
 
@@ -170,6 +176,7 @@ def sync_globals():
     for name in _MIRRORED:
         g[name] = snap[name]
     g["HSV_CFG"] = PI.hsv_config()
+    g["LAB_CFG"] = PI.lab_config()
     g["PILLAR_FILTER"] = PI.pillar_filter()
 
 
@@ -269,12 +276,61 @@ def largest(mask):
 #
 # Every threshold is tunable from the Tune tab ("filter" group).
 
-def floor_mask(hsv, pf):
-    m = cv2.inRange(hsv, (0, 0, pf["floor_v_min"]), (180, pf["floor_s_max"], 255))
+# TWO COLOUR SPACES
+#
+# HSV was the original. It separates the pillars on hue, but it gates on
+# SATURATION, and a matte pillar under dim indoor light falls under the S
+# threshold and simply vanishes - which is the usual reason green stops being
+# detected while red still works (red has two hue bands and survives longer).
+#
+# Lab does the same job without that failure mode. In OpenCV's 8-bit Lab, a
+# and b are centred on 128: a > 128 is red, a < 128 is green, and the white mat
+# sits near (128, 128) whatever the lighting does to L. So the pillars separate
+# on ONE channel, and brightness never removes the colour.
+#
+# Both are kept and USE_LAB picks between them, so a bad calibration is one
+# checkbox away from the behaviour you had before. calibrate_vision.py fits the
+# Lab ranges by clicking and turns USE_LAB on when you save.
+
+
+def colour_spaces(rgb):
+    """(hsv, lab) for one detection-sized frame. Both are cheap; the overlay
+    and the calibrator want whichever one you are not classifying in."""
+    return (cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV),
+            cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB))
+
+
+def chroma(lab):
+    """Distance from neutral grey in the a/b plane - the Lab analogue of HSV
+    saturation, and what the contrast test compares."""
+    ab = lab[:, :, 1:].astype(np.int16) - 128
+    return np.hypot(ab[:, :, 0], ab[:, :, 1]).astype(np.float32)
+
+
+def floor_mask(hsv, lab, pf):
+    """White mat. HSV: unsaturated and bright. Lab: bright and near-neutral."""
+    if USE_LAB:
+        L, a, b = lab[:, :, 0], lab[:, :, 1].astype(np.int16), lab[:, :, 2].astype(np.int16)
+        tol = FLOOR_AB_TOL
+        m = ((L >= FLOOR_L_MIN) & (np.abs(a - 128) <= tol)
+             & (np.abs(b - 128) <= tol)).astype(np.uint8) * 255
+    else:
+        m = cv2.inRange(hsv, (0, 0, pf["floor_v_min"]), (180, pf["floor_s_max"], 255))
     return cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
 
 
-def check_pillar(cnt, area, hsv, floor, pf):
+def colour_mask(hsv, lab, name):
+    """Binary mask for one pillar colour, in whichever space is selected."""
+    if USE_LAB:
+        lo, hi = LAB_CFG[name]
+        m = cv2.inRange(lab, np.array(lo, np.uint8), np.array(hi, np.uint8))
+        k = np.ones((5, 5), np.uint8)
+        m = cv2.morphologyEx(m, cv2.MORPH_OPEN, k)
+        return cv2.morphologyEx(m, cv2.MORPH_CLOSE, k)
+    return camera.build_mask(hsv, HSV_CFG[name])
+
+
+def check_pillar(cnt, area, hsv, lab, floor, pf):
     """None if the blob is a pillar, else a one-letter reject code (A/S/F/C)."""
     x, y, w, h = cv2.boundingRect(cnt)
     if h < pf["aspect_min"] * w:
@@ -297,27 +353,34 @@ def check_pillar(cnt, area, hsv, floor, pf):
 
     blob = np.zeros((h, w), np.uint8)
     cv2.drawContours(blob, [cnt - (x, y)], -1, 255, -1)
-    s_in = cv2.mean(hsv[y:y + h, x:x + w, 1], mask=blob)[0]
-    s_floor = cv2.mean(hsv[y0:y1, xa:xb, 1], mask=strip)[0]
-    if s_in - s_floor < pf["contrast_s_min"]:
-        return "C"
+    if USE_LAB:
+        ch = chroma(lab)
+        c_in = cv2.mean(ch[y:y + h, x:x + w], mask=blob)[0]
+        c_floor = cv2.mean(ch[y0:y1, xa:xb], mask=strip)[0]
+        if c_in - c_floor < LAB_CHROMA_MIN:
+            return "C"
+    else:
+        s_in = cv2.mean(hsv[y:y + h, x:x + w, 1], mask=blob)[0]
+        s_floor = cv2.mean(hsv[y0:y1, xa:xb, 1], mask=strip)[0]
+        if s_in - s_floor < pf["contrast_s_min"]:
+            return "C"
     return None
 
 
-def find_pillars(hsv, hsv_cfg, pf):
+def find_pillars(hsv, lab, pf):
     """(best, candidates, floor). best = (cnt, area, code) of the largest
     ACCEPTED blob or None; candidates = [(cnt, area, code, reject_or_None)]
     for the debug overlay."""
-    floor = floor_mask(hsv, pf)
+    floor = floor_mask(hsv, lab, pf)
     cands, best = [], None
-    for name, ranges in hsv_cfg.items():
-        cnts, _ = cv2.findContours(camera.build_mask(hsv, ranges),
+    for name in ("RED", "GREEN"):
+        cnts, _ = cv2.findContours(colour_mask(hsv, lab, name),
                                    cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         for c in cnts:
             a = cv2.contourArea(c)
             if a < MIN_AREA_PROC:
                 continue
-            why = check_pillar(c, a, hsv, floor, pf)
+            why = check_pillar(c, a, hsv, lab, floor, pf)
             cands.append((c, a, CODE[name], why))
             if why is None and (best is None or a > best[1]):
                 best = (c, a, CODE[name])
@@ -353,12 +416,12 @@ class VisionThread(threading.Thread):
         seq = 0
         try:
             while not self._halt.is_set():
-                hsv_cfg, pf = HSV_CFG, PILLAR_FILTER      # one read, one frame
+                pf = PILLAR_FILTER                        # one read, one frame
                 frame = camera.grab_rgb(cam, SWAP_RB)
                 small = cv2.resize(frame, PROC_SIZE, interpolation=cv2.INTER_AREA)
-                hsv = cv2.cvtColor(small, cv2.COLOR_RGB2HSV)
+                hsv, lab = colour_spaces(small)
 
-                best, cands, floor = find_pillars(hsv, hsv_cfg, pf)
+                best, cands, floor = find_pillars(hsv, lab, pf)
 
                 seq = (seq + 1) & 0xFFFFFFFF
                 if best is None:
@@ -848,6 +911,11 @@ async function tick(){
 }
 tick();
 </script></body></html>"""
+
+
+@app.route("/favicon.ico")
+def favicon():
+    return ("", 204)       # keeps the browser console clean
 
 
 @app.route("/")

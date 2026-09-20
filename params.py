@@ -95,6 +95,32 @@ PI_SPECS = [
          "bearing from the calibrated fisheye K/D (off = equidistant HFOV_DEG). "
          "Your K says +/-48 deg; hfov_deg says +/-80. Measure before trusting either"),
     Spec("SWAP_RB", True, 0, 1, "camera", "b", "swap red and blue channels"),
+    Spec("USE_LAB", False, 0, 1, "camera", "b",
+         "classify pillars in CIE Lab instead of HSV. Lab separates red from green on "
+         "the a channel without needing saturation, so a matte pillar under dim light "
+         "still passes. Set by calibrate_vision.py when you fit Lab ranges"),
+
+    # ---- Lab ranges (OpenCV 8-bit: L 0-255, a/b 0-255 with 128 = neutral) ----
+    # Fitted by clicking pillars and mat in calibrate_vision.py. Defaults are
+    # deliberately wide-open placeholders - calibrate before switching USE_LAB on.
+    Spec("RED_L_LO",   20, 0, 255, "lab", "i", "red pillar: lightness"),
+    Spec("RED_L_HI",  230, 0, 255, "lab", "i", ""),
+    Spec("RED_A_LO",  150, 0, 255, "lab", "i", "a: >128 is red, <128 is green"),
+    Spec("RED_A_HI",  255, 0, 255, "lab", "i", ""),
+    Spec("RED_B_LO",  128, 0, 255, "lab", "i", "b: >128 is yellow, <128 is blue"),
+    Spec("RED_B_HI",  255, 0, 255, "lab", "i", ""),
+    Spec("GREEN_L_LO",  20, 0, 255, "lab", "i", "green pillar: lightness"),
+    Spec("GREEN_L_HI", 230, 0, 255, "lab", "i", ""),
+    Spec("GREEN_A_LO",   0, 0, 255, "lab", "i", ""),
+    Spec("GREEN_A_HI", 110, 0, 255, "lab", "i", ""),
+    Spec("GREEN_B_LO",   0, 0, 255, "lab", "i", ""),
+    Spec("GREEN_B_HI", 255, 0, 255, "lab", "i", ""),
+    Spec("FLOOR_L_MIN", 120, 0, 255, "lab", "i",
+         "white mat in Lab: at least this bright ..."),
+    Spec("FLOOR_AB_TOL", 14, 1, 80, "lab", "i",
+         "... and within this of neutral (128) on both a and b"),
+    Spec("LAB_CHROMA_MIN", 20, 0, 128, "lab", "i",
+         "pillar chroma minus mat chroma under it; the Lab version of contrast_s_min"),
 
     # ---- HSV ----
     Spec("RED1_H_LO",   0, 0, 180, "hsv", "i", "red range 1"),
@@ -220,6 +246,16 @@ class PiParams:
                      [p["RED2_H_HI"], p["RED2_S_HI"], p["RED2_V_HI"]]]],
             "GREEN": [[[p["GREEN_H_LO"], p["GREEN_S_LO"], p["GREEN_V_LO"]],
                        [p["GREEN_H_HI"], p["GREEN_S_HI"], p["GREEN_V_HI"]]]],
+        }
+
+    def lab_config(self):
+        """{'RED': (lo, hi), 'GREEN': (lo, hi)} as (L, a, b) triples."""
+        p = self._vals
+        return {
+            "RED": ((p["RED_L_LO"], p["RED_A_LO"], p["RED_B_LO"]),
+                    (p["RED_L_HI"], p["RED_A_HI"], p["RED_B_HI"])),
+            "GREEN": ((p["GREEN_L_LO"], p["GREEN_A_LO"], p["GREEN_B_LO"]),
+                      (p["GREEN_L_HI"], p["GREEN_A_HI"], p["GREEN_B_HI"])),
         }
 
     def pillar_filter(self):
