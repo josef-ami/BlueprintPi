@@ -12,12 +12,12 @@ in an order where each step can only fail for one reason.
 |---|---|---|
 | `src/obstacle_round/ObstacleLap.cpp` | WRO_TeamBluePrint | STM32 firmware. `OpenRound.cpp` + one state. |
 | `control/solver.py` | BlueprintPi | The avoidance geometry. Pure functions. |
-| `control/supervisor.py` | BlueprintPi | NONE ↔ TRACK lifecycle. No leg, no timer — release is instant. |
+| `control/supervisor.py` | BlueprintPi | TRACK → COMMIT → IDLE lifecycle. |
 | `control/percept_link.py` | BlueprintPi | The two binary frames + the link thread. |
 | `obstacle_lap.py` | BlueprintPi | Entry point. Run this, not `main.py`. The loop is class `ObstacleLap`, which `dashboard.py` also runs. |
 | `dashboard.py` | BlueprintPi | Calibration tab, plus an **Obstacle run** tab that runs `ObstacleLap` in-process (§10). |
 | `config.json` | BlueprintPi | Same file plus a new `avoid` block. |
-| `tests/` | BlueprintPi | 76 tests, no hardware needed (the loop's command and floor-filter tests need OpenCV). |
+| `tests/` | BlueprintPi | 79 tests, no hardware needed (the loop's command and floor-filter tests need OpenCV). |
 
 `ObstacleExecutor.cpp` is **not** used. Its pin map (PB9/PB8 motor, TIM3
 encoder, IMU on PB5/PB4/PB3) is from an earlier car and does not match this
@@ -43,7 +43,7 @@ BOOT ──Pi says lidar + camera are up──> 5 s countdown ──┐
                                                          v
    ┌──────────────────────────────> HEADING <────────────┘
    │                                  │
-   │  pillar clear / out of view      ├─ pillar solved ──> AVOID ──┐
+   │  leg done                        ├─ pillar solved ──> AVOID ──┐
    └──────────────────────────────────┤                            │
                                       ├─ side open ×3 revs ──> TURN90 ──> back
                                       └─ 12 corners + front == start ──> FINISH
@@ -51,10 +51,9 @@ BOOT ──Pi says lidar + camera are up──> 5 s countdown ──┐
    RECOVER overlays any moving state when the front beam drops under 200 mm.
 ```
 
-AVOID → HEADING is not on a distance or a timer: it fires the instant the Pi
-sends `AVOID_NONE`, and the locked side's open-revolution count survives the
-trip through AVOID (it is not re-zeroed on that particular re-entry), so a
-corner sitting right after a pillar is not missed.
+The locked side's open-revolution count survives the trip through AVOID (it is
+not re-zeroed on that particular re-entry into HEADING), so a corner sitting
+right after a pillar is not missed.
 
 ---
 
@@ -87,21 +86,13 @@ clear gets a small correction, not a full swerve.
 | 250 mm | 29.2° | 218 mm | 99 mm |
 
 The tangent solve assumes the heading changes instantly; it does not, and the
-right-hand column is what that costs. That is why there are two regimes, both
-sent as the same wire action (`TRACK` — there is no separate "committed" value
-any more):
+right-hand column is what that costs. That is why the manoeuvre has two phases:
 
-- **`r_axis > freeze_mm`**: re-solve every tick, STM32 re-bases its odometry on
-  each refresh. The lag corrects itself.
-- **`r_axis <= freeze_mm`**: the Pi stops adopting new headings (the geometry
-  gets near-degenerate this close) and just holds the last one, but keeps
-  sending fresh `TRACK` frames so the STM32 keeps re-basing.
-
-Release back to `AVOID_NONE` happens the instant the pillar is confirmed clear,
-or after it has been missing from the camera for a few ticks — never on a
-distance or a timer. The old COMMIT phase that ran a leg out on odometry alone,
-even with the pillar invisible, is gone: losing sight of it now releases the
-manoeuvre instead of running it blind.
+- **TRACK** (`r_axis > freeze_mm`): re-solve every tick, STM32 re-bases its
+  odometry on each refresh. The lag corrects itself.
+- **COMMIT** (`r_axis <= freeze_mm`, or the pillar left the frame): freeze the
+  heading, run the leg out on odometry. This is what carries the car past a
+  pillar the camera can no longer see, and it survives a lidar dropout.
 
 ---
 
@@ -298,7 +289,7 @@ clearance is half the car width plus half the pillar, not the whole car width.
 
 Each rung isolates one failure. Do not skip.
 
-**1 — Geometry, on a laptop.** `python3 -m pytest tests/ -q`. 76 passed. If the
+**1 — Geometry, on a laptop.** `python3 -m pytest tests/ -q`. 79 passed. If the
 sign conventions are wrong this is where you find out, not on the mat.
 
 **2 — Perception, car stationary, no firmware.**
@@ -310,11 +301,8 @@ Walk a red pillar across the field of view. Watch:
 - range tracks your tape measure
 - `TRCK` appears at ~900 mm and the commanded heading is **negative for RED**,
   positive for GREEN
-- inside ~350 mm the heading stops changing, but it is still `TRCK` on the
-  status line — there is no separate committed state any more
-- hide the pillar → after a few ticks (`LOST_GRACE_TICKS`, default 3) the line
-  drops back to `----` and the note says "pillar out of view - released",
-  instantly, with no distance run out
+- `CMIT` appears at ~350 mm and the heading stops changing
+- hide the pillar → still `CMIT`, heading frozen
 
 **3 — Link, wheels off the ground.** Flash `ObstacleLap.cpp`, run without
 `--dry`. Expect `# colour CH4 READY`, `# zero yaw`, `# first PERCEPT frame
@@ -345,13 +333,13 @@ fallback — means the front beam was invalid, worth investigating).
 |---|---|---|---|---|
 | `margin_mm` | config | 40 | clipping pillars | running wide into walls |
 | `engage_mm` | config | 900 | reacting too late | chasing pillars in the next section |
-| `freeze_mm` | config | 350 | heading twitches near the pillar | holding a heading before the geometry has settled |
+| `freeze_mm` | config | 350 | heading twitches near the pillar | committing before the geometry settles |
 | `tail_clear_mm` | config | 150 | the tail clips on the way out | the car overshoots past the pillar |
 | `confirm_ticks` | config | 3 | false colour detections start manoeuvres | reacting too slowly |
 | `refractory_mm` | config | 150 | it re-locks the pillar it just passed | it misses a genuine second pillar |
 | `wall_margin_mm` | config | 90 | still touching walls | it refuses passes that were fine |
 | Speed (base) | dashboard | 70 | too slow to be competitive | overshooting solves / missing corners. Live slider on the Obstacle run tab; AVOID follows at 60/70 of it. `BASE_SPEED`/`AVOID_SPEED` in the .cpp are only the power-up defaults now. |
-| `POST_AVOID_LOCKOUT_CM` | .cpp | 15 | phantom turns right after an avoid | — (corner progress from before the avoid is preserved automatically now; this only covers PID settle time, so it rarely needs raising) |
+| `POST_AVOID_LOCKOUT_CM` | .cpp | 30 | phantom turns after an avoid | real corners missed after an avoid (though the count from *before* the avoid is preserved across it, so this is rarer than it was) |
 | `SIDE_OPEN_MM` | .cpp | 1500 | phantom turns mid-straight | corners missed |
 
 ---
@@ -366,11 +354,11 @@ fallback — means the front beam was invalid, worth investigating).
 | Obstacle range is always `inf` | Lidar plane height (4.1) or camera↔lidar alignment (4.3). Not a link problem. |
 | Steers the wrong way past pillars | Firmware servo mapping. The solver tests already cover the sign. |
 | Phantom turn mid-straight | `SIDE_OPEN_MM`, or a turn fired during/just after an avoid — raise `POST_AVOID_LOCKOUT_CM` |
-| Corner missed after a pillar | Should not happen any more — the open-revolution count from before the avoid now survives it. If it still does, check `# avoid capped`/`# avoid timed out` (the Pi's TRACK frames stopped arriving fresh, so the backstop fired instead of an instant release) and consider lowering `POST_AVOID_LOCKOUT_CM` |
+| Corner missed after a pillar | The open-revolution count from before the avoid survives it, so the usual causes are `POST_AVOID_LOCKOUT_CM` being too large, or the avoid leg overrunning — check `# avoid capped` |
 | Car swerves then straightens too early | `tail_clear_mm` |
 | Car finishes in the wrong place | `# FINISH by odo` in the log means the front beam was invalid at the start |
 | Heading drifts on straights | `HEAD_KP`, or the IMU did not zero — the car must be still at boot |
-| `# avoid capped` / `# avoid timed out` | Should not fire in normal operation — release is the Pi's call (`AVOID_NONE`), not a distance or a timer. Seeing this means TRACK frames stopped arriving fresh (link stale, or the Pi crashed/froze) and the last-resort backstop caught it. Check the link, not `engage_mm`. |
+| `# avoid timed out` | The Pi held TRACK for 5 s: it is seeing a pillar it never gets close to. Check `engage_mm` vs the fused range. |
 | Everything stops for ~250 ms at a time | The Pi tick is blocking. Check `q` — a climbing lidar queue means the consumer is falling behind. |
 
 ---
@@ -387,11 +375,11 @@ TELEM sync word and the Pi separates the two cleanly.
 | Byte | Field | Notes |
 |---|---|---|
 | 2 | `seq` | echoed in TELEM |
-| 3 | `flags` | b0 LIDAR_OK, b1 CAM_OK, b2–3 action (0 NONE / 1 TRACK / 2 COMMIT — wire-legal, but the Pi never sends 2 any more), b4 colour (0 RED / 1 GREEN), b5 HELLO |
+| 3 | `flags` | b0 LIDAR_OK, b1 CAM_OK, b2–3 action (0 NONE / 1 TRACK / 2 COMMIT), b4 colour (0 RED / 1 GREEN), b5 HELLO |
 | 4–9 | `left`, `front`, `right` | uint16 mm, `0xFFFF` = no return |
 | 10 | `rev` | lidar revolution, low 8 bits |
 | 11–12 | `target_heading` | int16, deg × 10, **absolute**, + = left |
-| 13–14 | `leg_remaining` | uint16 mm — a backstop cap now (`BACKSTOP_LEG_MM`, 1500), not a distance to reach; see §2 |
+| 13–14 | `leg_remaining` | uint16 mm |
 | 15 | `cmd` | 0 NONE, 1 RERUN, 2 STOP, 3 REBOOT |
 | 16 | `base_speed` | uint8 PWM for the straights (0 = unset → firmware keeps its default/last). Clamped to `[SPEED_MIN, SPEED_MAX]` = [40, 150]; AVOID keeps the same fraction of it the defaults have (60/70). Set live from the dashboard's Speed slider. |
 | 17 | `xor8` | over bytes 2–16 |
@@ -462,16 +450,14 @@ test — and run the tests.
 ### Safety layers (each works if the others fail)
 
 1. **Lidar staleness** (STM32, 200 ms / 1000 ms). Stale stops the car acting on
-   old distances; dead parks the car in HEADING until the lidar is back. A
-   frame carrying a command but no ranges (`LIDAR_OK = 0`) cannot clear the
+   old distances; dead parks the car in HEADING until the lidar is back (the
+   final run-out keeps going on its odometry fallback). A frame carrying a
+   committed leg or a command but no ranges (`LIDAR_OK = 0`) cannot clear the
    stale flag — otherwise `0xFFFF` side readings would look like an open corner.
-2. **Link staleness** (STM32, 250 ms). A stale link stops TRACK from re-basing
-   its odometry, which is what lets the backstop cap/timeout below engage
-   instead of holding a frozen heading with no one watching.
-3. **AVOID backstops** (STM32): 150 cm of travel or 5 s, whichever comes
-   first — last resort only. Normal release is entirely the Pi's call
-   (`AVOID_NONE`, sent the instant the pillar is clear or out of view); these
-   only fire if TRACK frames stop arriving fresh.
+2. **Link staleness** (STM32, 250 ms). A stale link stops TRACK from re-basing,
+   so a frozen heading expires on its own leg distance instead of running
+   forever.
+3. **Leg backstops** (STM32): 150 cm and 5 s, whichever comes first.
 4. **Wall panic** (STM32): front under 200 mm → reverse on mirrored steering,
    bounded to 3 attempts.
 5. **Checksum**, both directions. A corrupt frame is dropped, never acted on;
@@ -497,9 +483,8 @@ test — and run the tests.
 - **A pillar sitting right before a corner.** Fixed: the locked side's
   open-revolution count now survives a trip through AVOID (see §1's FSM note),
   so the corner that was building up before the pillar interrupted is not lost.
-  `POST_AVOID_LOCKOUT_CM` (15 cm by default — re-tune on the mat) still guards
-  the moment right after release so a still-yawed heading can't misfire the
-  corner trigger.
+  `POST_AVOID_LOCKOUT_CM` (30 cm by default) still guards the moment right
+  after the leg ends so a still-yawed heading can't misfire the corner trigger.
 
 ---
 

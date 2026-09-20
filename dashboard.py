@@ -53,7 +53,7 @@ from main import fuse_with
 import obstacle_lap
 from obstacle_lap import ObstacleLap
 from control import percept_link as pl
-from control.solver import AVOID_NONE, AVOID_TRACK
+from control.solver import AVOID_NONE, AVOID_TRACK, AVOID_COMMIT
 
 PORT = 8080
 JPEG_QUALITY = 70
@@ -1312,13 +1312,15 @@ def run_state(since):
                       "error": view.link.error} if not view.dry else None),
         }
     if tick is not None:
-        # Since the supervisor dropped COMMIT (control/supervisor.py), the
-        # only actions it reports are NONE and TRACK, and there is no leg or
-        # frozen-since timer left in snapshot() to surface here any more.
         sup = dict(tick.sup)
         sup["refractory_left_mm"] = _j(max(0.0, sup["refractory_until"] - tick.telem.odo_mm), 0)
+        sup["commit_left_mm"] = (_j(max(0.0, sup["leg_mm"] - (tick.telem.odo_mm - sup["commit_odo"])), 0)
+                                 if sup["action"] == AVOID_COMMIT else None)
+        sup["commit_age_s"] = (round(tick.t - sup["commit_t"], 2)
+                               if sup["action"] == AVOID_COMMIT else None)
         sup["refractory_until"] = _j(sup["refractory_until"], 0)
         sup["heading_abs"] = _j(sup["heading_abs"], 2)
+        sup["leg_mm"] = _j(sup["leg_mm"], 0)
         out["tick"] = {
             "t": tick.t, "age_s": round(now - tick.t, 3),
             "lidar_live": tick.lidar_live, "cam_live": tick.cam_live,

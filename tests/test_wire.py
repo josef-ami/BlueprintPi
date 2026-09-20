@@ -9,13 +9,6 @@ in ObstacleLap.cpp and checks they agree with the codec.
 
 If you change a frame, change it in three places and run this: the .cpp, the
 codec, and here.
-
-NOTE on AVOID_COMMIT / leg_mm: both are still wire-legal values (the byte
-layouts below are unchanged) but control/supervisor.py no longer sends
-AVOID_COMMIT, and leg_mm is now only ever a backstop cap, never a distance
-the STM32 counts down to — see the docstrings in supervisor.py and the AVOID
-state in ObstacleLap.cpp. This file tests the byte layout, which did not
-change, so it exercises those values exactly as before.
 """
 
 import os

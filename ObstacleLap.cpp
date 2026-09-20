@@ -59,9 +59,7 @@
 //     8-9    right  mm     u16
 //     10     lidar revolution counter
 //     11-12  avoid heading, deg x10   i16
-//     13-14  avoid leg, mm            u16   (see AVOID's own comment: this is
-//                                            only ever a backstop cap now, not
-//                                            a leg the car counts down to)
+//     13-14  avoid leg, mm            u16   (remaining distance to hold it for)
 //     15     CMD           0 = none, 1 = RERUN, 2 = STOP, 3 = REBOOT
 //     16     base speed    u8 PWM for the straights (0 = unset, keep default);
 //                          clamped to [SPEED_MIN, SPEED_MAX]. AVOID keeps a
@@ -179,10 +177,8 @@ const uint8_t P_AVOID_MASK = 0x0C, P_AVOID_SHIFT = 2;
 const uint8_t P_GREEN    = 0x10;
 const uint8_t P_HELLO    = 0x20;
 
-// AVOID_COMMIT (2) is still a valid value on the wire but the Pi no longer
-// sends it (see control/supervisor.py) — the only actions that arrive now are
-// NONE and TRACK. Left in place so an old Pi build, or a future one, cannot
-// desync the enum; this firmware treats a stray COMMIT exactly like TRACK.
+// TRACK is a live solve that re-bases the leg on every frame; COMMIT is a
+// frozen one that runs the leg out on odometry alone. See avoidStep().
 const uint8_t AVOID_NONE = 0, AVOID_TRACK = 1, AVOID_COMMIT = 2;
 
 // PERCEPT byte 15. Only these mean anything; every other value reads as NONE.
@@ -351,16 +347,15 @@ const int      RECOVER_MAX_TRIES = 3;
 const int   TARGET_CORNERS         = 12;
 const float SEARCH_SAFETY_CM       = 400.0;
 const float POST_CORNER_LOCKOUT_CM = 50.0;
-// Was sized for the old leg-driven avoid (which could run for several seconds
-// past the pillar). Now that AVOID releases the instant the Pi does — see the
-// AVOID state's own comment — the car spends far less time off-lane, so this
-// only needs to cover the heading PID's own settle time. Re-tune on the mat;
-// if a corner right after a pillar is still missed, try this lower before
-// touching anything else.
-const float POST_AVOID_LOCKOUT_CM  = 15.0;
+// Sized for the leg-driven avoid: the car is off-lane for the whole leg, so
+// the side beams are not square to the walls until well after it ends. The
+// open-revolution count from BEFORE the avoid is preserved across it (see
+// suppressCornerReset in headingStep()), so this only has to stop a still-yawed
+// heading from misfiring the corner trigger.
+const float POST_AVOID_LOCKOUT_CM  = 30.0;
 
-const float    AVOID_MAX_LEG_CM   = 150.0;   // backstop cap; see AVOID's comment
-const uint32_t AVOID_TIMEOUT_MS   = 5000;    // absolute backstop; see AVOID's comment
+const float    AVOID_MAX_LEG_CM   = 150.0;   // backstop: no avoid runs further
+const uint32_t AVOID_TIMEOUT_MS   = 5000;    // backstop: nor for longer
 const uint16_t FINISH_TOL_MM      = 60;      // front-distance match tolerance
 const float    FINAL_FALLBACK_CM  = 100.0;
 
@@ -917,21 +912,18 @@ void headingStep() {
 // ============================================================================
 // STATE: AVOID
 //
-// The Pi has already done the geometry. This state holds the heading it was
-// given and hands back to HEADING the instant the Pi says NONE — no distance,
-// no timer, just that one condition. Release is entirely the Pi's call (see
-// control/supervisor.py): it comes as soon as the pillar is either confirmed
-// clear or out of view, and updateHeadingPid(laneHeading) back in HEADING is
-// what closes the gap — an ordinary P-loop convergence, nothing scheduled.
+// The Pi has already done the geometry. This state just holds the heading it
+// was given for the distance it asked for.
 //
-//   TRACK   the only non-NONE action sent any more. While a fresh TRACK frame
-//           keeps arriving, RE-BASE the odometry every tick: avoidBaseTicks
-//           tracks "now", so travelled never accumulates and avoidLegTicks/
-//           AVOID_MAX_LEG_CM/AVOID_TIMEOUT_MS are inert. They exist purely as
-//           a last-resort backstop for a genuinely stuck link (TRACK frames
-//           stop arriving fresh, or the link goes stale) — not as the normal
-//           way out. Do not read pLegMm as a target to reach; the Pi does not
-//           send one any more (see BACKSTOP_LEG_MM in supervisor.py).
+//   TRACK   the solve is live and being refreshed. RE-BASE the odometry on
+//           every fresh frame, so the leg measures from the newest solution
+//           and the turn-in lag corrects itself instead of accumulating.
+//   COMMIT  the solve is frozen (the pillar is close, or has left the camera's
+//           view). Do NOT re-base: the leg now runs out on odometry alone,
+//           which is what carries the car past a pillar it can no longer see.
+//
+// Ends on whichever comes first: the Pi says NONE, the leg completes, the
+// 150 cm cap, or the 5 s timeout. The last two are backstops, not the plan.
 //
 // No corner watching here: the car is yawed, so the side beams are not square
 // to the walls. A corner that opens during an avoid is still open when HEADING
@@ -961,9 +953,8 @@ void avoidStep() {
     return;
   }
 
-  // A stale link means the last TRACK heading is not being refreshed any more.
-  // Stop re-basing and let the backstop cap/timeout below take over, rather
-  // than holding a frozen heading indefinitely with no one watching.
+  // Only a LIVE track re-bases. A stale link freezes the manoeuvre where it
+  // is, so the leg expires on its own distance instead of running forever.
   if (pAction == AVOID_TRACK && !linkStale) {
     avoidTargetHeading = pHeadingDeg;
     avoidLegTicks = (long)(pLegMm * TICKS_PER_MM);
@@ -974,11 +965,12 @@ void avoidStep() {
   setMotorSpeed(avoidSpeed);          // live: a mid-avoid slider change applies too
 
   long travelled = absEnc(gOdoTicks - avoidBaseTicks);
+  bool done    = travelled >= avoidLegTicks;
   bool capped  = travelled >= (long)(AVOID_MAX_LEG_CM * TICKS_PER_CM);
   bool timeout = (millis() - phaseT0) > AVOID_TIMEOUT_MS;
 
-  if (capped || timeout) {
-    if (capped)  Serial.println(F("# avoid capped (link not re-basing)"));
+  if (done || capped || timeout) {
+    if (capped)  Serial.println(F("# avoid capped"));
     if (timeout) Serial.println(F("# avoid timed out"));
     avoidLockoutFrom = gOdoTicks;
     targetHeading = laneHeading;
@@ -1110,9 +1102,9 @@ void serviceCommands() {
 //   8  u8   pCmdRun                     44  u16  finish_target_mm (odo fallback)
 //   9  u8   runNumber                   46  u16  front_at_start_mm (0xFFFF)
 //  10  u16  state_ms                    48  u16  phase_mm (AVOID/TURN90/RECOVER)
-//  12  u16  countdown_ms  (BOOT)        50  u16  avoid_leg_mm     (AVOID, now
-//  14  u16  grace_ms      (BOOT)                 always the backstop cap, not
-//  16  u16  avoid_ms      (AVOID)                a target — see AVOID's comment)
+//  12  u16  countdown_ms  (BOOT)        50  u16  avoid_leg_mm     (AVOID)
+//  14  u16  grace_ms      (BOOT)
+//  16  u16  avoid_ms      (AVOID)
 //  18  i16  lane_heading   x10          52  u16  link_age_ms  (0xFFFF never)
 //  20  i16  target_heading x10          54  u16  lidar_age_ms (0xFFFF never)
 //  22  i16  servo_cmd x10 (servo deg)   56  u32  percept_frames
