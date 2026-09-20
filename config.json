@@ -118,5 +118,6 @@
     "bearing_tol_deg": 2
   },
   "min_blob_area": 300,
-  "swap_rb": true
+  "swap_rb": true,
+  "camera_offset_deg": 5 
 }
