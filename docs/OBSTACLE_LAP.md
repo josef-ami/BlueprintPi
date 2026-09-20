@@ -14,9 +14,10 @@ in an order where each step can only fail for one reason.
 | `control/solver.py` | BlueprintPi | The avoidance geometry. Pure functions. |
 | `control/supervisor.py` | BlueprintPi | TRACK → COMMIT → IDLE lifecycle. |
 | `control/percept_link.py` | BlueprintPi | The two binary frames + the link thread. |
-| `obstacle_lap.py` | BlueprintPi | Entry point. Run this, not `main.py`. |
+| `obstacle_lap.py` | BlueprintPi | Entry point. Run this, not `main.py`. The loop is class `ObstacleLap`, which `dashboard.py` also runs. |
+| `dashboard.py` | BlueprintPi | Calibration tab, plus an **Obstacle run** tab that runs `ObstacleLap` in-process (§10). |
 | `config.json` | BlueprintPi | Same file plus a new `avoid` block. |
-| `tests/` | BlueprintPi | 38 tests, no hardware needed. |
+| `tests/` | BlueprintPi | 77 tests, no hardware needed (the loop's command and floor-filter tests need OpenCV). |
 
 `ObstacleExecutor.cpp` is **not** used. Its pin map (PB9/PB8 motor, TIM3
 encoder, IMU on PB5/PB4/PB3) is from an earlier car and does not match this
@@ -100,15 +101,20 @@ cp control/solver.py control/supervisor.py control/percept_link.py control/
 cp obstacle_lap.py .
 cp -r tests .
 # config.json: either replace it, or paste the "avoid" block into yours
-python3 -m pytest tests/ -q          # 38 passed, before you touch the car
+python3 -m pytest tests/ -q          # 77 passed, before you touch the car
 
 # --- STM32 ---
 # src/obstacle_round/ObstacleLap.cpp -> flash by DFU, same toolchain as OpenRound
 ```
 
 `control/__init__.py` needs no change — the new modules are imported by full
-path. Nothing in `openRound.py`, `main.py`, `dashboard.py` or `OpenRound.cpp` is
-modified, so the open round still runs exactly as it does today.
+path. `openRound.py` and `OpenRound.cpp` are untouched, so the open round runs
+exactly as it does today. `main.py` gained `fuse_with()` (what `fuse()` now calls)
+and `sensors/camera.py`'s `detect_blobs()` optional `masks_out`, `floor`,
+`rejected_out` and `context_out`. `fuse_with()` changes nothing for existing
+callers. The camera thread now passes `floor=` from `config.json`, so **every**
+caller's blobs go through the floor filter (4.4a); set `"floor": {"enabled":
+false}` to get the old behaviour back.
 
 ---
 
@@ -170,6 +176,48 @@ rejects the noise but keeps a pillar at 2 m — at 2 m a 50 mm pillar is small.
 **Do this again on competition day, in the competition hall.** It is the single
 most common reason a working obstacle round stops working at an event.
 
+### 4.4a Floor / pillar filter — only red and green that stand on the mat
+
+A red banner, a green exit sign or someone's shirt beyond the walls passes the
+HSV test just like a pillar. `sensors/camera.detect_blobs` therefore keeps a
+colour blob only if it **stands on our floor**:
+
+1. **Contact strip.** Take the rows just under the blob (`strip_px` tall,
+   central 60 % of its width). At least `min_white_frac` of those pixels must
+   be white mat (saturation ≤ `white_s_max`, brightness ≥ `white_v_min`).
+   A pillar whose base is below the bottom of the image is kept
+   (*base below view*) — it is close, and it is certainly on the floor.
+2. **Linked to the floor in front of the car** (`linked`). That white must be
+   connected to the white floor at the bottom of the image without crossing a
+   wall-dark pixel (brightness ≤ `dark_v_max`). A white card on the far side
+   of the black wall passes test 1 but fails this one (*wall between*).
+   Orange/blue corner lines are not dark, so they do not cut the floor.
+
+`ignore_bottom_px` blanks the bottom rows out of the floor seed if the car's
+own body or bumper shows at the bottom of the frame.
+
+Everything that uses `detect_blobs` — the calibration views, `/api/worldstate`,
+`obstacle_lap.py` and the dashboard's run tab — uses the filter, with the
+`"floor"` block of `config.json`. Tune it on the calibration tab:
+
+- **Floor filter** view: blue = white floor linked to the car, purple = white
+  cut off by the wall, each blob's contact strip in green (pass) or red (fail),
+  the ignored bottom rows hatched.
+- **Blobs** view: kept pillars as before; rejected colour blobs as dashed grey
+  boxes labelled *not on floor* or *wall between*.
+- **Floor / pillar filter** section: on/off, the link check on/off, and the six
+  sliders. *Save* writes them to `config.json` like the HSV bands.
+
+Under venue light, first raise `white_v_min` until the **Floor filter** view
+shows the mat solid blue with the walls not blue, then check every pillar on
+the mat has a green strip at 0.3 m, 1 m and 2 m. The **Mask** view on the
+calibration tab stays the raw HSV threshold (it is what the HSV sliders act
+on); the run tab's RED/GREEN masks are pillar-only, next to a white-floor tile.
+
+The filter also drops a far pillar whose base is hidden behind a wall, e.g.
+seen over the inner wall across the corner. That one is in another section and
+out of the lidar's reach anyway.
+
 ### 4.5 Floor colour thresholds
 
 Unchanged from the open round (`pR > 52 && pB < 18` → orange,
@@ -222,7 +270,7 @@ clearance is half the car width plus half the pillar, not the whole car width.
 
 Each rung isolates one failure. Do not skip.
 
-**1 — Geometry, on a laptop.** `python3 -m pytest tests/ -q`. 38 passed. If the
+**1 — Geometry, on a laptop.** `python3 -m pytest tests/ -q`. 77 passed. If the
 sign conventions are wrong this is where you find out, not on the mat.
 
 **2 — Perception, car stationary, no firmware.**
@@ -283,6 +331,7 @@ fallback — means the front beam was invalid, worth investigating).
 |---|---|
 | Car never starts, LED1 slow blink | The Pi is not sending. `ls /dev/ttyACM*`. Is `obstacle_lap.py` running? |
 | `# WARN camera down` at start | Camera thread died — check the `[CameraThread] fatal:` line above it |
+| A pillar on the mat is not detected, but the Mask view shows it | Floor filter (4.4a): **Blobs** view says why (*not on floor* / *wall between*); **Floor filter** view shows whether the mat reads white |
 | Obstacle range is always `inf` | Lidar plane height (4.1) or camera↔lidar alignment (4.3). Not a link problem. |
 | Steers the wrong way past pillars | Firmware servo mapping. The solver tests already cover the sign. |
 | Phantom turn mid-straight | `SIDE_OPEN_MM`, or a turn fired during/just after an avoid — raise `POST_AVOID_LOCKOUT_CM` |
@@ -302,7 +351,7 @@ fallback — means the front beam was invalid, worth investigating).
 lines share the port; `0xAA` is not ASCII, so a log line can never contain the
 TELEM sync word and the Pi separates the two cleanly.
 
-### PERCEPT — Pi → STM32, 16 bytes, 50 Hz, sync `AA 55`
+### PERCEPT — Pi → STM32, 17 bytes, 50 Hz, sync `AA 55`
 
 | Byte | Field | Notes |
 |---|---|---|
@@ -312,7 +361,48 @@ TELEM sync word and the Pi separates the two cleanly.
 | 10 | `rev` | lidar revolution, low 8 bits |
 | 11–12 | `target_heading` | int16, deg × 10, **absolute**, + = left |
 | 13–14 | `leg_remaining` | uint16 mm |
-| 15 | `xor8` | over bytes 2–14 |
+| 15 | `cmd` | 0 NONE, 1 RERUN, 2 STOP, 3 REBOOT |
+| 16 | `xor8` | over bytes 2–15 |
+
+**CMD (byte 15)**
+
+| Value | Taken when | Effect | The Pi holds it until |
+|---|---|---|---|
+| 1 RERUN | a 0 → 1 edge while FINISH or STOPPED | back to BOOT: HELLO, 5 s countdown, finish line re-measured at GO | TELEM shows BOOT |
+| 2 STOP | 3 consecutive good frames, any state but FINISH/STOPPED | motor off, steering centred → STOPPED | TELEM shows STOPPED (or FINISH) |
+| 3 REBOOT | 3 consecutive good frames | motor off, `# REBOOT from Pi`, then `NVIC_SystemReset()`; USB drops and re-enumerates, `setup()` re-zeroes the yaw | — (the Pi sends 6 and closes the port) |
+
+A frame sent only to carry a command has `LIDAR_OK` clear and no ranges, so it
+refreshes the STM32's link clock but never its lidar clock, and it repeats the
+current `rev` so it cannot count as a new revolution.
+
+### STATUS — STM32 → Pi, 61 bytes, 10 Hz, sync `55 A5`
+
+Reporting only — nothing on either side decides anything from it. It carries the
+FSM internals TELEM does not, for the dashboard's state-machine panel. Firmware
+without it still works with everything else; `PerceptLink.status()` stays `None`.
+
+| Byte | Field | Byte | Field |
+|---|---|---|---|
+| 2 | version (1) | 32–33 | lidar L mm (`0xFFFF` far) |
+| 3 | state | 34–35 | lidar R mm (`0xFFFF` far) |
+| 4 | flags: b0 FSM_STARTED, b1 BOOT_READY, b2 LIDAR_HOLD, b3 LINK_STALE, b4 BLIND, b5 RERUN_ARMED, b6 WALL_SEEN_L, b7 WALL_SEEN_R | 36–37 | straight mm (HEADING) |
+| 5 | flags2: b0 REAL_OPEN_L, b1 REAL_OPEN_R, b2 LOCK_NEEDS_REAL_RETURN | 38–39 | post-corner lockout mm left |
+| 6 | last PERCEPT: b0 HELLO, b1 LIDAR_OK, b2 CAM_OK, b3 GREEN, b4–5 action | 40–41 | post-avoid lockout mm left |
+| 7 | last CMD byte | 42–43 | segment mm (since GO / last turn) |
+| 8 | frames in a row carrying it | 44–45 | odo-fallback finish target mm |
+| 9 | run number (GOs since power-up) | 46–47 | front at start mm (`0xFFFF`) |
+| 10–11 | ms in state | 48–49 | phase mm: AVOID travelled / TURN90 arc / RECOVER backed |
+| 12–13 | BOOT countdown ms left | 50–51 | AVOID leg mm |
+| 14–15 | BOOT camera grace ms left | 52–53 | ms since last PERCEPT (`0xFFFF` never) |
+| 16–17 | AVOID ms elapsed | 54–55 | ms since last LIDAR_OK frame (`0xFFFF` never) |
+| 18–19 | lane heading, int16 deg × 10 | 56–59 | PERCEPT frames received, uint32 |
+| 20–21 | target heading (HEADING lane / AVOID solved / TURN90 arc), int16 × 10 | 60 | `xor8` over bytes 2–59 |
+| 22–23 | servo command, int16 servo-deg × 10 | | |
+| 24–25 | motor PWM, int16 | | |
+| 26–27 | open revolutions L, R | | |
+| 28–29 | recover tries, state RECOVER returns to | | |
+| 30 | finish reason: 0 –, 1 wall, 2 odo, 3 STOP command | 31 | reserved (0) |
 
 ### TELEM — STM32 → Pi, 22 bytes, 50 Hz, sync `55 AA`
 
@@ -325,33 +415,37 @@ TELEM sync word and the Pi separates the two cleanly.
 | 10–11 | `heading` int16, deg × 10 |
 | 12–13 | `yaw_rate` int16, deg/s × 10 |
 | 14–15 | `front_mm` uint16, `0xFFFF` invalid |
-| 16 | `state` (BOOT 0 … RECOVER 5) |
+| 16 | `state` (BOOT 0 … RECOVER 5, STOPPED 6) |
 | 17 | `corner_count` |
 | 18–19 | `avoid_remaining_mm` uint16 |
-| 20 | `floor_colour` (0 none, 1 orange, 2 blue) |
+| 20 | `floor_colour` (always 0: this firmware does not read the colour sensor) |
 | 21 | `xor8` over bytes 2–20 |
 
-`tests/test_wire.py` re-implements both C-side halves from the offsets written
-in `ObstacleLap.cpp` and checks they agree with the Python codec. **If you change
-a frame, change it in three places** — the `.cpp`, `percept_link.py`, and that
+`tests/test_wire.py` re-implements the C-side halves (PERCEPT parsing and the
+CMD rules, TELEM and STATUS packing) from the offsets written in
+`ObstacleLap.cpp` and checks they agree with the Python codec. **If you change a
+frame, change it in three places** — the `.cpp`, `percept_link.py`, and that
 test — and run the tests.
 
 ### Safety layers (each works if the others fail)
 
 1. **Lidar staleness** (STM32, 200 ms / 1000 ms). Stale stops the car acting on
-   old distances; dead disables the lidar corner trigger and falls back to the
-   colour gate. A frame carrying a committed leg but no ranges (`LIDAR_OK = 0`)
-   cannot clear the stale flag — otherwise `0xFFFF` side readings would look
-   like an open corner.
+   old distances; dead parks the car in HEADING until the lidar is back (the
+   final run-out keeps going on its odometry fallback). A frame carrying a
+   committed leg or a command but no ranges (`LIDAR_OK = 0`) cannot clear the
+   stale flag — otherwise `0xFFFF` side readings would look like an open corner.
 2. **Link staleness** (STM32, 250 ms). A stale link stops TRACK from re-basing,
    so a frozen heading expires on its own leg distance instead of running
    forever.
 3. **Leg backstops** (STM32): 150 cm and 5 s, whichever comes first.
 4. **Wall panic** (STM32): front under 200 mm → reverse on mirrored steering,
    bounded to 3 attempts.
-5. **Checksum**, both directions. A corrupt frame is dropped, never acted on.
-
----
+5. **Checksum**, both directions. A corrupt frame is dropped, never acted on;
+   STOP and REBOOT additionally need 3 identical frames in a row.
+6. **STOP** (Pi → STM32, CMD 2). There is **no link-loss motor cut**: if the Pi
+   just goes quiet, the car carries on under its own logic. The dashboard's
+   *Stop car* and *End session* (and stopping `robodash.service`) send STOP and
+   wait for STOPPED; the CLI's Ctrl-C only closes the port.
 
 ## 9. Known limits
 
@@ -366,3 +460,29 @@ test — and run the tests.
   equals straight-line distance; the finish uses the front-wall match for
   exactly that reason, with the `L − A` encoder arithmetic only as a fallback.
 - **Parking is not implemented.** `FINISH` is a full stop, rule 9.24.2.
+
+---
+
+## 10. Running it from the dashboard
+
+`dashboard.py` → **Obstacle run** tab (`http://<pi>:8080/#run`). It runs the
+same `ObstacleLap` loop the CLI runs, in the dashboard process, on the camera
+and lidar the dashboard already owns, so there is nothing to stop first.
+
+| Control | What it does |
+|---|---|
+| **Start** | Reads `config.json` from disk (unsaved slider changes are *not* used, as with the CLI), opens the port and starts the loop. `--dry`, `--no-avoid` and `--port` are the CLI's options. |
+| **Stop car** | Holds CMD STOP until TELEM shows STOPPED. The loop keeps running. |
+| **Rerun** | FINISH or STOPPED only: holds CMD RERUN until TELEM shows BOOT. |
+| **End session** | STOP first (1 s to be acknowledged), then the loop stops and the port is released. The car is left STOPPED: next time, Start then Rerun, or Reboot. |
+| **Reboot STM32** | Click twice. STOP, end the session, 6 × CMD REBOOT, close the port, then watch the USB device drop and come back. The yaw re-zeroes at boot, so keep the car still. |
+
+The page shows the camera with the run's own detections (rejected blobs dashed
+grey, see 4.4a), its pillar-only RED/GREEN masks and the white-floor mask, the same lidar/obstacle/fusion views as the calibration tab (computed
+with the run's config), the STM32 state machine (from TELEM + STATUS) with
+every condition the current state is waiting on, the Pi avoidance supervisor,
+the CLI's status line as live fields, and a console with everything the CLI
+would print (the status line once a second, as with `--quiet`).
+
+The open-round stream toggle on the calibration tab and a run cannot hold
+`/dev/ttyACM0` at the same time; the dashboard refuses the second one.

@@ -12,7 +12,7 @@ driving is in ObstacleLap.cpp.
 
 import math
 
-from .percept_link import ST_BOOT, ST_TURN90, ST_RECOVER, ST_FINISH
+from .percept_link import ST_BOOT, ST_TURN90, ST_RECOVER, ST_FINISH, ST_STOPPED
 from .solver import AvoidCfg, solve, AVOID_NONE, AVOID_TRACK, AVOID_COMMIT, wrap180
 
 LOST_GRACE_TICKS = 3            # missed detections tolerated before committing
@@ -58,7 +58,7 @@ class AvoidSupervisor:
     def tick(self, obstacles, telem, now, left_mm, right_mm):
         """Returns (action, color, target_heading_deg, leg_remaining_mm, note)."""
         # The STM32 is doing something we must not interrupt.
-        if telem.state in (ST_BOOT, ST_TURN90, ST_RECOVER, ST_FINISH):
+        if telem.state in (ST_BOOT, ST_TURN90, ST_RECOVER, ST_FINISH, ST_STOPPED):
             if self.action != AVOID_NONE:
                 self.reset(refractory_from_odo=telem.odo_mm)
             return AVOID_NONE, "", 0.0, 0.0, "stm32 busy"
@@ -136,6 +136,24 @@ class AvoidSupervisor:
         self.commit_t = now
         return (AVOID_COMMIT, self.color, self.heading_abs, self.leg_mm,
                 f"freeze ({why}) {self.leg_mm:.0f}mm")
+
+    def snapshot(self):
+        """Read-only view of the lifecycle internals, for the dashboard."""
+        return {
+            "action": self.action,
+            "color": self.color,
+            "heading_abs": self.heading_abs,
+            "leg_mm": self.leg_mm,
+            "commit_odo": self.commit_odo,
+            "commit_t": self.commit_t,
+            "confirm": self._confirm,
+            "confirm_ticks": self.confirm_ticks,
+            "lost": self._lost,
+            "lost_grace": LOST_GRACE_TICKS,
+            "commit_timeout_s": COMMIT_TIMEOUT_S,
+            "refractory_until": self._refractory_until,
+            "refractory_mm": self.refractory_mm,
+        }
 
     def pick(self, obstacles):
         """Nearest RED/GREEN with a real range, inside the working cone."""
