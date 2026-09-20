@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from control.solver import AvoidCfg, AVOID_NONE, AVOID_TRACK, AVOID_COMMIT
 from control.supervisor import AvoidSupervisor
-from control.percept_link import ST_HEADING, ST_TURN90, ST_AVOID
+from control.percept_link import ST_HEADING, ST_TURN90, ST_AVOID, ST_STOPPED
 
 CFG = AvoidCfg(wall_guard=False)
 
@@ -154,3 +154,22 @@ def test_nearest_pillar_wins():
     _, color, *_ = run(s, [Obs("RED", 10.0, 800.0), Obs("GREEN", -5.0, 400.0)],
                        Tel(), n=3)
     assert color == "GREEN"
+
+
+def test_a_dashboard_stop_cancels_everything():
+    s = sup()
+    run(s, [Obs("RED", 0.0, 250.0)], Tel(), n=3)
+    action, _, _, _, note = run(s, [Obs("RED", 0.0, 250.0)],
+                                Tel(state=ST_STOPPED), n=1)
+    assert action == AVOID_NONE and note == "stm32 busy"
+    assert s.action == AVOID_NONE
+
+
+def test_snapshot_reports_the_lifecycle():
+    s = sup()
+    run(s, [Obs("GREEN", 0.0, 600.0)], Tel(), n=2)
+    snap = s.snapshot()
+    assert snap["confirm"] == 2 and snap["confirm_ticks"] == 3
+    assert snap["action"] == AVOID_NONE
+    run(s, [Obs("GREEN", 0.0, 600.0)], Tel(), n=1)
+    assert s.snapshot()["action"] == AVOID_TRACK

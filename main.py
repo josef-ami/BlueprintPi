@@ -31,6 +31,20 @@ def fuse(camera_result, lidar_result):
     bearing, using floor + gap-split selection (see select_range): the pillar
     is nearest by construction, so we take the min of the near cluster and
     ignore the wall behind it. Distance stays inf if nothing valid is found.
+
+    Uses the fusion parameters read from config.json when this module was
+    imported. fuse_with() is the same thing with explicit parameters.
+    """
+    return fuse_with(camera_result, lidar_result,
+                     BEARING_MATCH_DEG, RANGE_FLOOR_MM, GAP_SPLIT_MM)
+
+
+def fuse_with(camera_result, lidar_result, bearing_match_deg, range_floor_mm,
+              gap_split_mm):
+    """
+    fuse() with explicit parameters, for a caller whose config was read later
+    than this module's import (dashboard.py loads config.json when a run is
+    started, not when the dashboard process started).
     """
     if camera_result is None:
         return []
@@ -40,9 +54,9 @@ def fuse(camera_result, lidar_result):
     ranges = lidar_result.ranges
     for obs in obstacles:
         center = int(round(obs.bearing_deg)) % 360
-        obs.distance_mm = select_range(ranges, center, BEARING_MATCH_DEG,
-                                       floor_mm=RANGE_FLOOR_MM,
-                                       gap_split_mm=GAP_SPLIT_MM)
+        obs.distance_mm = select_range(ranges, center, bearing_match_deg,
+                                       floor_mm=range_floor_mm,
+                                       gap_split_mm=gap_split_mm)
     return obstacles
 
 
