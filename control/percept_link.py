@@ -48,7 +48,7 @@ except ImportError:          # the codec and the constants are useful off-robot
 
 PERCEPT_SYNC = b"\xAA\x55"
 TELEM_SYNC = b"\x55\xAA"
-PERCEPT_LEN = 17
+PERCEPT_LEN = 18
 TELEM_LEN = 22
 STATUS_SYNC = b"\x55\xA5"
 STATUS_LEN = 61
@@ -294,7 +294,7 @@ def pack_percept(seq: int, left_mm, front_mm, right_mm, rev: int,
                  lidar_ok: bool, cam_ok: bool, hello: bool,
                  action: int, green: bool,
                  target_heading_deg: float, leg_mm: float,
-                 cmd: int = CMD_NONE) -> bytes:
+                 cmd: int = CMD_NONE, base_speed: int = 0) -> bytes:
     flags = 0
     if lidar_ok:
         flags |= P_LIDAR_OK
@@ -305,11 +305,14 @@ def pack_percept(seq: int, left_mm, front_mm, right_mm, rev: int,
     if green:
         flags |= P_GREEN
     flags |= (action & 0x03) << P_AVOID_SHIFT
-    payload = struct.pack("<BBHHHBhHB", seq & 0xFF, flags,
+    # base_speed (byte 16): PWM for the straights, or 0 = "unset" (the firmware
+    # then keeps its default / last value). Command-only frames leave it 0 so
+    # they never change the speed. See ObstacleLap.cpp applyPercept().
+    payload = struct.pack("<BBHHHBhHBB", seq & 0xFF, flags,
                           _u16(left_mm), _u16(front_mm), _u16(right_mm),
                           rev & 0xFF, _ddeg(target_heading_deg),
                           max(0, min(0xFFFF, int(round(leg_mm)))),
-                          cmd & 0xFF)
+                          cmd & 0xFF, max(0, min(255, int(base_speed))))
     return PERCEPT_SYNC + payload + bytes([_xor8(payload)])
 
 

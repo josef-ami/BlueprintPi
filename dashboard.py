@@ -1002,6 +1002,18 @@ class RunManager:
             threading.Thread(target=s.stop_car_and_wait, daemon=True).start()
         return True, None
 
+    def set_speed(self, pwm):
+        s = self.session
+        if s is None:
+            return False, "no session is running"
+        try:
+            v = s.lap.set_speed(pwm)
+        except (TypeError, ValueError):
+            return False, f"bad speed value {pwm!r}"
+        # Applies on the next frame (dry sessions send nothing, but the value is
+        # still stored so the slider stays in sync and a later real run uses it).
+        return True, {"speed": v}
+
     def rerun(self):
         s = self.session
         if s is None:
@@ -1278,6 +1290,9 @@ def run_state(since):
                          if view.started_at else None,
             "loop_alive": view.alive(), "error": view.error,
             "pending_cmd": pl.CMD_NAMES[lap.pending_command()],
+            "speed": lap.speed,
+            "speed_min": obstacle_lap.SPEED_MIN,
+            "speed_max": obstacle_lap.SPEED_MAX,
             "cfg": {"send_hz": obstacle_lap.SEND_HZ, "tol": lap.tol,
                     "d_clear": round(a.clearance_mm, 1), "engage": a.engage_mm,
                     "freeze": a.freeze_mm, "max_bearing": a.max_bearing_deg,
@@ -1472,6 +1487,14 @@ def api_run_stop_car():
 @app.route("/api/run/rerun", methods=["POST"])
 def api_run_rerun():
     return _reply(*run_mgr.rerun())
+
+
+@app.route("/api/run/speed", methods=["POST"])
+def api_run_speed():
+    ok, res = run_mgr.set_speed(_req_json().get("speed"))
+    if not ok:
+        return jsonify({"ok": False, "error": res}), 409
+    return jsonify({"ok": True, "speed": res["speed"]})
 
 
 @app.route("/api/run/end", methods=["POST"])

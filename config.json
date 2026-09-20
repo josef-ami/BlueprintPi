@@ -3,8 +3,8 @@
     "car_half_width_mm": 57.1,
     "confirm_ticks": 3,
     "engage_mm": 900,
-    "freeze_mm": 700,
-    "margin_mm": 80,
+    "freeze_mm": 350,
+    "margin_mm": 40,
     "max_bearing_deg": 50,
     "max_heading_deg": 45,
     "min_range_mm": 150,
@@ -45,20 +45,9 @@
     "model": "fisheye",
     "rms_reproj_error": 1.7575010745141275
   },
-  "camera_offset_deg": 5,
-  "floor": {
-    "dark_v_max": 50,
-    "enabled": true,
-    "ignore_bottom_px": 0,
-    "linked": true,
-    "min_white_frac": 0.4,
-    "strip_px": 10,
-    "white_s_max": 172,
-    "white_v_min": 120
-  },
   "fusion": {
     "bearing_match_deg": 8,
-    "gap_split_mm": 400,
+    "gap_split_mm": 200,
     "range_floor_mm": 120
   },
   "hfov_deg": 160,
@@ -66,12 +55,12 @@
     "GREEN": [
       [
         [
-          82,
-          108,
-          46
+          40,
+          80,
+          60
         ],
         [
-          106,
+          85,
           255,
           255
         ]
@@ -94,12 +83,24 @@
     "RED": [
       [
         [
-          165,
-          154,
-          84
+          0,
+          120,
+          70
         ],
         [
-          179,
+          10,
+          255,
+          255
+        ]
+      ],
+      [
+        [
+          170,
+          120,
+          70
+        ],
+        [
+          180,
           255,
           255
         ]
@@ -107,15 +108,16 @@
     ]
   },
   "lidar": {
-    "bearing_tol_deg": 2,
     "cluster_gap_mm": 120,
     "max_range_mm": 3000,
     "min_cluster_points": 3,
     "min_neighbours": 2,
     "mount_offset_deg": 0,
     "neighbour_dist_mm": 150,
-    "quality_floor": 10
+    "quality_floor": 10,
+    "bearing_tol_deg": 2
   },
   "min_blob_area": 300,
-  "swap_rb": true
+  "swap_rb": true,
+  "camera_offset_deg": 5 
 }

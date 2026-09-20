@@ -38,8 +38,8 @@ def xor8(b):
 
 def c_apply_percept(f):
     assert f[0] == 0xAA and f[1] == 0x55
-    assert len(f) == 17
-    assert xor8(f[2:16]) == f[16]
+    assert len(f) == 18
+    assert xor8(f[2:17]) == f[17]
     flags = f[3]
     return dict(
         seq=f[2],
@@ -55,6 +55,7 @@ def c_apply_percept(f):
         heading=struct.unpack_from("<h", f, 11)[0] / 10.0,
         leg=struct.unpack_from("<H", f, 13)[0],
         cmd=f[15],
+        base_speed=f[16],
     )
 
 
@@ -81,7 +82,7 @@ def c_send_telemetry(status=0, odo=0, spd=0, head_dd=0, yaw_dd=0, front=0xFFFF,
 def test_percept_length_and_sync():
     frame = pl.pack_percept(1, 100, 200, 300, 7, True, True, True,
                             pl.P_AVOID_SHIFT and 1, False, 0.0, 0)
-    assert len(frame) == pl.PERCEPT_LEN == 17
+    assert len(frame) == pl.PERCEPT_LEN == 18
     assert frame[:2] == pl.PERCEPT_SYNC == b"\xAA\x55"
 
 
@@ -99,6 +100,7 @@ def test_percept_round_trips_through_the_c_parser():
     assert got["heading"] == -12.3
     assert got["leg"] == 587
     assert got["cmd"] == pl.CMD_NONE          # default: no command
+    assert got["base_speed"] == 0             # default: unset -> firmware keeps its own
 
 
 def test_negative_headings_survive_as_int16():
@@ -192,10 +194,10 @@ class CFirmware:
                     self.buf = bytearray([c]) if c == 0xAA else bytearray()
                 continue
             self.buf.append(c)
-            if len(self.buf) == 17:
+            if len(self.buf) == 18:
                 f = bytes(self.buf)
                 self.buf = bytearray()
-                if xor8(f[2:16]) == f[16]:
+                if xor8(f[2:17]) == f[17]:
                     self._apply(f)
 
     def _apply(self, f):
@@ -222,9 +224,24 @@ def test_cmd_byte_round_trips_through_the_c_parser():
     for cmd in (pl.CMD_NONE, pl.CMD_RERUN, pl.CMD_STOP, pl.CMD_REBOOT):
         f = pl.pack_percept(5, 400, 1500, 600, 9, True, True, True, 1, False,
                             -3.5, 250, cmd=cmd)
-        assert len(f) == 17
+        assert len(f) == 18
         got = c_apply_percept(f)
         assert got["cmd"] == cmd and got["leg"] == 250 and got["action"] == 1
+
+
+def test_base_speed_byte_round_trips_and_is_clamped_to_a_byte():
+    for sp in (0, 40, 70, 150, 255):
+        f = pl.pack_percept(5, 400, 1500, 600, 9, True, True, True, 1, False,
+                            -3.5, 250, cmd=pl.CMD_NONE, base_speed=sp)
+        assert c_apply_percept(f)["base_speed"] == sp
+    # out-of-byte values are clamped, not wrapped
+    assert c_apply_percept(pl.pack_percept(0, 0, 0, 0, 0, True, True, False, 0,
+                                           False, 0.0, 0, base_speed=999))["base_speed"] == 255
+
+
+def test_command_only_frame_carries_no_speed():
+    # A command-only frame must leave the speed at 0 so it never changes it.
+    assert c_apply_percept(pl.pack_command_frame(1, pl.CMD_STOP))["base_speed"] == 0
 
 
 def test_command_only_frame_never_refreshes_the_lidar():
@@ -276,7 +293,7 @@ def test_a_single_corrupt_frame_cannot_fire_anything():
                                       True, True, rnd.randrange(3), rnd.random() < .5,
                                       rnd.uniform(-180, 180), rnd.uniform(0, 1500)))
         if rnd.random() < 0.2:
-            f[rnd.randrange(2, 17)] ^= 1 << rnd.randrange(8)
+            f[rnd.randrange(2, 18)] ^= 1 << rnd.randrange(8)
         fw.feed(bytes(f))
     assert fw.fired == []
 

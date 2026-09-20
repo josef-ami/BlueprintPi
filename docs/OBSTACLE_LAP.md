@@ -350,7 +350,7 @@ fallback — means the front beam was invalid, worth investigating).
 | `confirm_ticks` | config | 3 | false colour detections start manoeuvres | reacting too slowly |
 | `refractory_mm` | config | 150 | it re-locks the pillar it just passed | it misses a genuine second pillar |
 | `wall_margin_mm` | config | 90 | still touching walls | it refuses passes that were fine |
-| `AVOID_SPEED` | .cpp | 60 | steering feels sluggish mid-avoid | overshooting the solve |
+| Speed (base) | dashboard | 70 | too slow to be competitive | overshooting solves / missing corners. Live slider on the Obstacle run tab; AVOID follows at 60/70 of it. `BASE_SPEED`/`AVOID_SPEED` in the .cpp are only the power-up defaults now. |
 | `POST_AVOID_LOCKOUT_CM` | .cpp | 15 | phantom turns right after an avoid | — (corner progress from before the avoid is preserved automatically now; this only covers PID settle time, so it rarely needs raising) |
 | `SIDE_OPEN_MM` | .cpp | 1500 | phantom turns mid-straight | corners missed |
 
@@ -393,7 +393,8 @@ TELEM sync word and the Pi separates the two cleanly.
 | 11–12 | `target_heading` | int16, deg × 10, **absolute**, + = left |
 | 13–14 | `leg_remaining` | uint16 mm — a backstop cap now (`BACKSTOP_LEG_MM`, 1500), not a distance to reach; see §2 |
 | 15 | `cmd` | 0 NONE, 1 RERUN, 2 STOP, 3 REBOOT |
-| 16 | `xor8` | over bytes 2–15 |
+| 16 | `base_speed` | uint8 PWM for the straights (0 = unset → firmware keeps its default/last). Clamped to `[SPEED_MIN, SPEED_MAX]` = [40, 150]; AVOID keeps the same fraction of it the defaults have (60/70). Set live from the dashboard's Speed slider. |
+| 17 | `xor8` | over bytes 2–16 |
 
 **CMD (byte 15)**
 
@@ -515,6 +516,7 @@ and lidar the dashboard already owns, so there is nothing to stop first.
 | **Rerun** | FINISH or STOPPED only: holds CMD RERUN until TELEM shows BOOT. |
 | **End session** | STOP first (1 s to be acknowledged), then the loop stops and the port is released. The car is left STOPPED: next time, Start then Rerun, or Reboot. |
 | **Reboot STM32** | Click twice. STOP, end the session, 6 × CMD REBOOT, close the port, then watch the USB device drop and come back. The yaw re-zeroes at boot, so keep the car still. |
+| **Speed** | The straight-line PWM (40–150), sent in every frame (PERCEPT byte 16) and applied **live** — drag it mid-run and the firmware re-asserts it on the next tick, no restart. AVOID speed follows as a fixed fraction (60/70 of base); TURN90 and RECOVER are unaffected. Held in the session only (not written to `config.json`); each Start begins at the default 70. |
 
 The page shows the camera with the run's own detections (rejected blobs dashed
 grey, see 4.4a), its pillar-only RED/GREEN masks and the white-floor mask, the same lidar/obstacle/fusion views as the calibration tab (computed

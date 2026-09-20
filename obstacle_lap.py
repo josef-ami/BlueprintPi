@@ -52,6 +52,14 @@ LIDAR_STALE_S = 0.3             # no point for this long -> the lidar is not sca
 CAMERA_STALE_S = 0.5
 CMD_TIMEOUT_S = 3.0             # a held command the STM32 never acknowledges is dropped
 
+# Base (straight) speed in PWM, sent to the STM32 in every PERCEPT frame. The
+# firmware clamps to its own [SPEED_MIN, SPEED_MAX] band and scales the avoid
+# speed by the same fraction; these must match ObstacleLap.cpp so the dashboard
+# slider's ends line up with what the firmware will actually accept.
+DEFAULT_BASE_SPEED = 70
+SPEED_MIN = 40
+SPEED_MAX = 150
+
 BEARINGS = (("front", 0), ("left", 90), ("right", 270))   # robot frame, CCW+
 
 
@@ -149,6 +157,24 @@ class ObstacleLap:
         self._cmd_lock = threading.Lock()
         self._cmd = CMD_NONE
         self._cmd_t0 = 0.0
+
+        # Base (straight) speed sent every frame; read config, else the default.
+        self._speed = int(cfg.get("run", {}).get("base_speed", DEFAULT_BASE_SPEED))
+        self._speed = max(SPEED_MIN, min(SPEED_MAX, self._speed))
+
+    # ---- straight-line speed (PERCEPT byte 16) ----
+
+    def set_speed(self, pwm):
+        """Set the base (straight) speed the STM32 runs, clamped to the band the
+        firmware accepts. Applied live: the next frame carries it, and the
+        firmware re-asserts it every tick, so it takes effect mid-run."""
+        v = max(SPEED_MIN, min(SPEED_MAX, int(pwm)))
+        self._speed = v
+        return v
+
+    @property
+    def speed(self):
+        return self._speed
 
     # ---- the banner the CLI has always printed first ----
 
@@ -261,7 +287,8 @@ class ObstacleLap:
                                rev=lidar.rev, lidar_ok=lidar_live, cam_ok=cam_live,
                                hello=self.hello_sent, action=action,
                                green=(color == "GREEN"),
-                               target_heading_deg=heading, leg_mm=leg, cmd=cmd)
+                               target_heading_deg=heading, leg_mm=leg, cmd=cmd,
+                               base_speed=self._speed)
                 sent = True
         elif cmd != CMD_NONE and not self.dry:
             # rev repeats the lidar's current count so this frame cannot look

@@ -63,7 +63,10 @@
 //                                            only ever a backstop cap now, not
 //                                            a leg the car counts down to)
 //     15     CMD           0 = none, 1 = RERUN, 2 = STOP, 3 = REBOOT
-//     16     XOR of bytes 2..15
+//     16     base speed    u8 PWM for the straights (0 = unset, keep default);
+//                          clamped to [SPEED_MIN, SPEED_MAX]. AVOID keeps a
+//                          fixed fraction of it. Set live from the dashboard.
+//     17     XOR of bytes 2..16
 //
 //   RERUN acts only on a 0 -> 1 change seen while the car is FINISHED (or
 //   STOPPED). A 1 already being sent when the run ends does nothing, and
@@ -144,8 +147,16 @@ const float SERVO_MAX_LEFT      = 20.0;   // below straight steers LEFT
 const float SERVO_MAX_RIGHT     = 140.0;  // above straight steers RIGHT
 const float IMU_YAW_SIGN        = 1.0;
 
-const int BASE_SPEED  = 70;    // straights
-const int AVOID_SPEED = 60;    // threading a pillar: slower buys solve accuracy
+const int BASE_SPEED  = 70;    // default straight speed (until the Pi sends one)
+const int AVOID_SPEED = 60;    // default pillar-threading speed (slower buys accuracy)
+const int SPEED_MIN   = 40;    // a Pi-commanded base speed is clamped to this band:
+const int SPEED_MAX   = 150;   //   below SPEED_MIN the car stalls; above is unsafe
+// Runtime speeds. Start at the defaults above; the dashboard's speed slider
+// overwrites baseSpeed via PERCEPT byte 16, and avoidSpeed keeps the same
+// fraction of base the two defaults have (60/70). TURN90 and RECOVER run their
+// own PWM laws and are not touched by the slider.
+int baseSpeed  = BASE_SPEED;
+int avoidSpeed = AVOID_SPEED;
 
 const unsigned long START_DELAY_MS = 5000;
 
@@ -160,7 +171,7 @@ float initialYawOffset = 0.0;
 // ============================================================================
 const uint8_t PERCEPT_SYNC0 = 0xAA, PERCEPT_SYNC1 = 0x55;
 const uint8_t TELEM_SYNC0   = 0x55, TELEM_SYNC1   = 0xAA;
-const uint8_t PERCEPT_LEN = 17, TELEM_LEN = 22;
+const uint8_t PERCEPT_LEN = 18, TELEM_LEN = 22;
 
 const uint8_t P_LIDAR_OK = 0x01;
 const uint8_t P_CAM_OK   = 0x02;
@@ -241,6 +252,7 @@ float   pHeadingDeg = 0.0;
 uint16_t pLegMm = 0;
 uint8_t pCmd = CMD_NONE;          // latest CMD byte (RERUN: FINISH/STOPPED only)
 uint8_t pCmdRun = 0;              // consecutive good frames carrying pCmd
+uint8_t pBaseSpeed = 0;           // latest base-speed byte (0 = unset; see applyPercept)
 
 uint8_t rxBuf[PERCEPT_LEN];
 uint8_t rxLen = 0;
@@ -268,6 +280,16 @@ void applyPercept(const uint8_t *f) {
   memcpy(&leg,     f + 13, 2);
   pCmdRun  = (f[15] == pCmd) ? (uint8_t)min(255, pCmdRun + 1) : 1;
   pCmd     = f[15];
+
+  // Base speed (byte 16). 0 means "unset" — keep whatever we have (the default,
+  // or the last value the Pi sent), so a command-only frame (which carries 0)
+  // never zeroes the speed. Otherwise clamp to the safe band and scale AVOID by
+  // the same fraction the two defaults have.
+  pBaseSpeed = f[16];
+  if (pBaseSpeed != 0) {
+    baseSpeed  = constrain((int)pBaseSpeed, SPEED_MIN, SPEED_MAX);
+    avoidSpeed = (int)(baseSpeed * (AVOID_SPEED / (float)BASE_SPEED) + 0.5);
+  }
 
   pHeadingDeg = head_dd / 10.0;
   pLegMm      = leg;
@@ -677,8 +699,8 @@ void recoverStep() {
   currentState = recoverReturnState;
   entered      = recoverReturnEntered;
   resetHeadingPid();
-  if (currentState == STATE_HEADING)    setMotorSpeed(BASE_SPEED);
-  else if (currentState == STATE_AVOID) setMotorSpeed(AVOID_SPEED);
+  if (currentState == STATE_HEADING)    setMotorSpeed(baseSpeed);
+  else if (currentState == STATE_AVOID) setMotorSpeed(avoidSpeed);
   // TURN90 sets its own PWM each step.
 }
 
@@ -779,7 +801,7 @@ void headingStep() {
     lidarHold = false;
     resetHeadingPid();
     dcBaseTicks = gOdoTicks;
-    setMotorSpeed(BASE_SPEED);
+    setMotorSpeed(baseSpeed);
     dcLockoutTicks = (cornerCount > 0) ? (long)(POST_CORNER_LOCKOUT_CM * TICKS_PER_CM) : 0;
     dcSafetyTicks  = (long)(SEARCH_SAFETY_CM * TICKS_PER_CM);
     Serial.println(F("# HEADING"));
@@ -829,6 +851,12 @@ void headingStep() {
     entered = false;                   // re-enter: speed, PID, counters
     return;
   }
+
+  // Genuinely cruising now (not parked, not held): re-assert the base speed
+  // every tick so the dashboard's slider takes effect mid-straight, not only
+  // on the next HEADING entry. Placed AFTER the dead/hold returns above so it
+  // can never override their motor-off.
+  setMotorSpeed(baseSpeed);
 
   long straightTicks = absEnc(gOdoTicks - dcBaseTicks);
   if (straightTicks >= dcSafetyTicks) {
@@ -919,7 +947,7 @@ void avoidStep() {
     avoidBaseTicks = gOdoTicks;
     avoidLegTicks  = (long)(pLegMm * TICKS_PER_MM);
     resetHeadingPid();
-    setMotorSpeed(AVOID_SPEED);
+    setMotorSpeed(avoidSpeed);
     Serial.print(F("# AVOID ")); Serial.print(pGreen ? F("GREEN->left ") : F("RED->right "));
     Serial.print(avoidTargetHeading); Serial.println(F(" deg"));
   }
@@ -943,6 +971,7 @@ void avoidStep() {
   }
 
   updateHeadingPid(avoidTargetHeading);
+  setMotorSpeed(avoidSpeed);          // live: a mid-avoid slider change applies too
 
   long travelled = absEnc(gOdoTicks - avoidBaseTicks);
   bool capped  = travelled >= (long)(AVOID_MAX_LEG_CM * TICKS_PER_CM);

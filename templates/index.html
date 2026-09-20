@@ -200,6 +200,10 @@
   button.mini{padding:1px 8px;font-size:11.5px}
   .opts{margin-top:6px;font-size:12.5px;gap:14px}
   .opts input[type=text],.opts input:not([type]){font:inherit;font-size:12px;padding:2px 6px;border:1px solid var(--rule);border-radius:3px;width:170px}
+  .speed-row{margin-top:8px;font-size:12.5px;gap:10px}
+  .speed-row label{white-space:nowrap}
+  .speed-row input[type=range]{flex:1;min-width:120px}
+  .speed-row input[type=range][disabled]{opacity:.4;cursor:default}
   .ctl-msg{margin-top:6px;font-size:12.5px;min-height:18px}
   .banner{margin-top:4px;font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .fields{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:3px 8px}
@@ -483,6 +487,10 @@
         <label><input type="checkbox" id="o-dry"> --dry</label>
         <label><input type="checkbox" id="o-noavoid"> --no-avoid</label>
         <label>--port <input id="o-port" class="num" spellcheck="false"></label>
+      </div>
+      <div class="ctl-row speed-row">
+        <label for="o-speed">Speed <b class="num" id="o-speed-v">—</b> PWM</label>
+        <input type="range" id="o-speed" min="40" max="150" step="1" disabled>
       </div>
       <div class="ctl-msg" id="ctl-msg"></div>
       <div class="banner num" id="banner"></div>
@@ -1049,6 +1057,17 @@ $("b-reboot").onclick=async()=>{
   if(await post("/api/run/reboot",{port:$("o-port").value.trim()})) msg("Rebooting…","info"); };
 $("o-port").addEventListener("input",()=>portTouched=true);
 
+/* Speed slider: debounced POST while dragging. speedHoldUntil keeps the poll
+   from snapping the knob back to a slightly stale ss.speed for a moment after
+   the last drag, until the POST and one status cycle have caught up. */
+let speedPending=null, speedHoldUntil=0;
+$("o-speed").addEventListener("input",e=>{
+  $("o-speed-v").textContent=e.target.value;
+  speedHoldUntil=Date.now()+600;
+  clearTimeout(speedPending);
+  speedPending=setTimeout(()=>post("/api/run/speed",{speed:+e.target.value}),80);
+});
+
 function renderRunControls(d,t,tm,ss){
   const active=!!(ss&&ss.active), busy=!!d.busy, dry=active&&ss.dry;
   const fresh=tm&&tm.age_s<0.5, parked=fresh&&(tm.state_name==="FINISH"||tm.state_name==="STOPPED");
@@ -1060,6 +1079,16 @@ function renderRunControls(d,t,tm,ss){
   $("b-rerun").disabled=!active||dry||busy||!parked||(ss&&ss.pending_cmd!=="NONE");
   $("b-end").disabled=!active||busy;
   $("b-reboot").disabled=busy;
+  // speed slider: usable on a live non-dry session; the knob follows ss.speed
+  // except right after a drag (speedHoldUntil), and its ends follow the
+  // firmware's clamp band reported in ss.
+  const sp=$("o-speed");
+  sp.disabled=!(active&&!dry&&!busy);
+  if(active&&ss.speed!=null){
+    if(+sp.min!==ss.speed_min) sp.min=ss.speed_min;
+    if(+sp.max!==ss.speed_max) sp.max=ss.speed_max;
+    if(Date.now()>speedHoldUntil){ sp.value=ss.speed; $("o-speed-v").textContent=ss.speed; }
+  } else if(!active){ $("o-speed-v").textContent="—"; }
   // message line: pending command > reboot progress > last action > hints
   let html="";
   const rb=d.reboot;
@@ -1182,7 +1211,7 @@ function describeStm32(d,t,tm,st,ss){
   else if(S==="HEADING"){
     phase=st.lidar_hold?"PARKED · lidar dead":`straight · corner ${tm.corner_count}/${FW.CORNERS}`;
     lead=st.lidar_hold?`Lidar dead (no LIDAR_OK frame for over ${FW.LIDAR_DEAD} ms): motor off. The straight restarts from scratch when the lidar returns.`
-      :`Driving the straight at PWM ${st.motor_pwm} (BASE_SPEED ${FW.BASE}), holding lane heading ${sg(st.lane_heading_deg)}° with the heading PID: now ${sg(hd)}°, error ${sg(err)}°, ${ctrl}.`;
+      :`Driving the straight at PWM ${st.motor_pwm} (base speed, set live from the Speed slider; default ${FW.BASE}), holding lane heading ${sg(st.lane_heading_deg)}° with the heading PID: now ${sg(hd)}°, error ${sg(err)}°, ${ctrl}.`;
     rows+=nsec("Checked every pass, in this order");
     const act=st.p_action;
     rows+=nrow(act&&!st.link_stale?"fire":st.link_stale?"block":"wait","1 · Pillar from Pi",act?(st.link_stale?"manoeuvre ignored: link stale":`${act===2?"COMMIT":"TRACK"} received → AVOID`):`none · Pi: ${esc(t?t.note:"—")}`);
@@ -1214,7 +1243,7 @@ function describeStm32(d,t,tm,st,ss){
   else if(S==="AVOID"){
     const green=st.p_green, a=st.p_action;
     phase=`${green?"GREEN · pass on its left":"RED · pass on its right"} · ${a===1?"TRACK":"released"}`;
-    lead=`Threading a pillar: holding the Pi-solved absolute heading ${sg(st.target_heading_deg)}° (now ${sg(hd)}°, error ${sg(err)}°) at PWM ${st.motor_pwm} (AVOID_SPEED ${FW.AVOID_PWM}), ${servoText(st.servo_deg)}.`;
+    lead=`Threading a pillar: holding the Pi-solved absolute heading ${sg(st.target_heading_deg)}° (now ${sg(hd)}°, error ${sg(err)}°) at PWM ${st.motor_pwm} (avoid speed — a fixed fraction of the base speed; default ${FW.AVOID_PWM}), ${servoText(st.servo_deg)}.`;
     if(a===1) rows+=nrow(st.link_stale?"warn":"info","Mode TRACK",st.link_stale?"link stale: re-basing stopped — the backstops below are the only way out until TRACK resumes":"each fresh TRACK frame re-bases the odometry, so this never runs out on its own while frames keep arriving. Release is the Pi's call alone (AVOID_NONE), the instant it sees the pillar clear or gone.");
     else rows+=nrow("fire","Pi sent NONE","avoid released → HEADING");
     rows+=nrow(st.phase_mm>=FW.AVOID_CAP?"fire":"wait","Backstop: distance cap",`${st.phase_mm} / ${FW.AVOID_CAP} mm ${nbar(st.phase_mm/FW.AVOID_CAP)} — last resort only, engages if TRACK ever stops re-basing`);
