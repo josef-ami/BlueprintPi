@@ -29,6 +29,7 @@ WHY THE MAP IS FROZEN WHILE LOST
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass, field as dc_field
 
 from perception.state import WorldBelief
@@ -38,7 +39,20 @@ from nav import arena
 LOCK_TOTAL = 0.55        # minimum fit total to accept a lock
 LOST_SCORE = 0.45        # tracking score below this is a bad frame
 LOST_FRAMES = 5          # consecutive bad frames before declaring LOST
-MAX_STEP_MM = 300.0      # further than the car can move between scans
+MAX_STEP_MM = 300.0      # further than the car could move between scans
+
+# Vehicle geometry - these MUST match nav/service.py or the whole map shifts.
+# The LiDAR sits ahead of the vehicle reference point, and that same point is
+# the origin used to place signs: get it wrong and every pillar is entered that
+# far from where it really is, which then snaps onto the wrong seat.
+LIDAR_AHEAD_MM = 130.0
+# The camera sits ON TOP of the LiDAR on this car, so they share an origin.
+# That makes camera-bearing -> LiDAR-pillar association exact: no parallax
+# term, the two sensors disagree only by noise. (nav/service.py assumes 150 mm
+# for a different mounting - do not copy that number here.)
+CAMERA_AHEAD_MM = LIDAR_AHEAD_MM
+TICKS_PER_MM = 1.4853
+ODO_FRESH_S = 0.5        # telemetry older than this = no odometry available
 
 
 def section_of(x, y):
@@ -76,10 +90,18 @@ class NavState:
 
 
 class Navigator:
-    def __init__(self, car_len_mm=175.0, sensor_ahead=0.0,
-                 sides=("N", "E", "S", "W"), cw=None):
+    def __init__(self, car_len_mm=175.0, sensor_ahead=LIDAR_AHEAD_MM,
+                 sides=("N", "E", "S", "W"), cw=None,
+                 ticks_per_mm=TICKS_PER_MM, camera_ahead=CAMERA_AHEAD_MM):
         self.wb = WorldBelief(sensor_ahead=sensor_ahead)
         self.car_len_mm = car_len_mm
+        self.ticks_per_mm = ticks_per_mm
+        self.camera_ahead = camera_ahead
+        # odometry (optional): fed from the STM32's IMU heading + encoder
+        self._last_ticks = None
+        self._last_head = None
+        self._odo_t = 0.0
+        self._cam = []
         self.sides = sides
         self.cw_hint = cw
         self.state = "INIT"
@@ -93,15 +115,47 @@ class Navigator:
         self._prev_pose = None
         self._seen_straights = []
 
+    # ------------------------------------------------- inputs from the car
+    def on_telemetry(self, heading_deg, enc_ticks, t=None):
+        """IMU heading (deg) + encoder ticks from the STM32, at its loop rate.
+
+        Dead-reckons between scans. Cheap (~tens of us) so it is safe in the
+        50 Hz control loop. Once this is flowing, tracking switches from
+        'ungated re-match every scan' to 'predict then gated correction',
+        which is what stops the pose wandering when a scan is partial.
+        """
+        t = time.time() if t is None else t
+        h = math.radians(heading_deg)
+        if self._last_ticks is None:
+            self._last_ticks, self._last_head, self._odo_t = enc_ticks, h, t
+            return
+        d_mm = (enc_ticks - self._last_ticks) / self.ticks_per_mm
+        dth = (h - self._last_head + math.pi) % (2 * math.pi) - math.pi
+        self._last_ticks, self._last_head, self._odo_t = enc_ticks, h, t
+        if self.state == "LOCKED":
+            self.wb.predict(d_mm, dth)
+
+    def on_camera(self, detections):
+        """detections: [(colour, bearing_deg)] with 1=red, 0=green, + = left."""
+        if detections:
+            self._cam = list(detections)
+
+    @property
+    def has_odometry(self):
+        return (time.time() - self._odo_t) < ODO_FRESH_S
+
     # ---------------------------------------------------------------- step
     def step(self, ranges, cam_dets=None):
+        if cam_dets:
+            self.on_camera(cam_dets)
         if self.state in ("INIT", "LOST"):
             self._try_fix(ranges)
         else:
             self._track(ranges)
 
         if self.state == "LOCKED":
-            self.wb.update(ranges, cam_dets=cam_dets)
+            cam, self._cam = self._cam, []
+            self.wb.update(ranges, cam_dets=cam or None)
             self._advance_sections()
         return self.snapshot()
 
@@ -128,7 +182,14 @@ class Navigator:
 
     def _track(self, ranges):
         prev = self.wb.pose
-        _pose, score = self.wb.track(ranges)
+        if self.has_odometry:
+            # odometry already moved the pose in on_telemetry(); the scan is a
+            # GATED correction on top, which rejects a bad match instead of
+            # following it. This is the stable mode.
+            self.wb.correct(ranges)
+            score = self.wb.score
+        else:
+            _pose, score = self.wb.track(ranges)
         jumped = (self._prev_pose is not None and
                   math.hypot(self.wb.pose[0] - prev[0],
                              self.wb.pose[1] - prev[1]) > MAX_STEP_MM)
@@ -162,7 +223,8 @@ class Navigator:
         snap = self.wb.snapshot(ranges=ranges)
         snap.update({"nav": {"state": self.state, "direction": self.direction,
                              "section": self.section, "corners": self.corners,
-                             "laps": self.laps}})
+                             "laps": self.laps,
+                             "odometry": self.has_odometry}})
         return snap
 
     def state_tuple(self):
