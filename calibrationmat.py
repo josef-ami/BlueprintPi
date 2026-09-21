@@ -683,6 +683,9 @@ def main():
     ap.add_argument("--port", default=None)
     ap.add_argument("--tol", type=int, default=None)
     ap.add_argument("--status", action="store_true")
+    ap.add_argument("--dash", action="store_true",
+                    help="seat-capture DASHBOARD on :8081 (recommended)")
+    ap.add_argument("--port", type=int, default=8081)
     ap.add_argument("--seats", action="store_true",
                     help="STEP 3: record where signs REALLY stand")
     ap.add_argument("--at", help="x,y,deg rough pose, to settle which corridor")
@@ -698,6 +701,11 @@ def main():
 
     if args.status:
         status(args.out)
+        return
+    if args.dash:
+        from perception import seat_dash
+        seat_dash.main(port=args.port,
+                       sides=(args.start,) if args.start else ("N","E","S","W"))
         return
     if args.seats:
         at = None
