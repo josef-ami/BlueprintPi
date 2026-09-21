@@ -92,7 +92,7 @@ def _live_source():
                 continue
             last = lidar.rev
             yield list(lidar.ranges), None
-    return gen(), None, lz
+    return gen(), None, None        # no ground-truth scenario for live
 
 
 def run(source, guess, frames=12, cw=True):
