@@ -32,6 +32,7 @@ so the cloud keeps growing. Ctrl-C stops a run cleanly and still saves.
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import time
 
@@ -82,19 +83,148 @@ def clean_scan(scan):
     return out, before - int(np.isfinite(out).sum())
 
 
+# ------------------------------------------------------------ telemetry
+def drain_telem(buf, head, odo, count):
+    """Pull complete TELEM frames out of the RX buffer, newest wins.
+
+    Returns (remaining_bytes, n_frames). The frames are removed so the caller
+    can treat what is left as ASCII log text.
+    """
+    from perception.telemetry import SYNC, TELEM_LEN, decode
+    got = 0
+    while True:
+        i = buf.find(SYNC)
+        if i < 0 or len(buf) - i < TELEM_LEN:
+            break
+        frame = bytes(buf[i:i + TELEM_LEN])
+        t = decode(frame)
+        if t is None:                      # bad checksum: not a frame after all
+            buf = buf[:i] + buf[i + 2:]    # drop the false sync, keep the rest
+            continue
+        buf = buf[:i] + buf[i + TELEM_LEN:]
+        head[0] = t["heading_deg"]
+        odo[0] = float(t["odo_ticks"])
+        count[0] += 1
+        got += 1
+    return buf, got
+
+
+# ----------------------------------------------------- wall fitting (step 2)
+LEFT_SECTOR = (60, 120)       # bearings that look at the left-hand wall
+RIGHT_SECTOR = (240, 300)
+MIN_SECTOR_PTS = 8
+PARALLEL_TOL_DEG = 12.0
+
+
+def _fit_line(pts, trims=3):
+    """Total-least-squares line through pts, trimmed. Returns (dist, ang, rms).
+
+    dist = perpendicular distance from the sensor to the line
+    ang  = direction of the line, degrees
+    """
+    p = np.asarray(pts, dtype=np.float64)
+    for _ in range(trims):
+        if len(p) < MIN_SECTOR_PTS:
+            return None
+        c = p.mean(axis=0)
+        u, s_, vt = np.linalg.svd(p - c, full_matrices=False)
+        d = vt[0]                       # direction of greatest spread
+        nrm = np.array([-d[1], d[0]])   # unit normal
+        res = (p - c) @ nrm
+        rms = float(np.sqrt(np.mean(res ** 2)))
+        keep = np.abs(res) <= max(3.0 * rms, 25.0)
+        if keep.all():
+            break
+        p = p[keep]
+    c = p.mean(axis=0)
+    u, s_, vt = np.linalg.svd(p - c, full_matrices=False)
+    d = vt[0]
+    nrm = np.array([-d[1], d[0]])
+    res = (p - c) @ nrm
+    return (abs(float(c @ nrm)), math.degrees(math.atan2(d[1], d[0])),
+            float(np.sqrt(np.mean(res ** 2))), len(p))
+
+
+def _sector_points(scan, lo, hi):
+    idx = np.arange(lo, hi + 1) % 360
+    r = scan[idx]
+    ok = np.isfinite(r)
+    a = np.radians(idx[ok].astype(np.float64))
+    return np.stack([r[ok] * np.cos(a), r[ok] * np.sin(a)], axis=1)
+
+
+def fit_walls(path):
+    """STEP 2, per-scan: fit the two corridor walls in EVERY scan on its own.
+
+    No pose is needed and none is trusted. Each revolution independently sees a
+    wall on its left and one on its right; fitting both and adding the two
+    perpendicular distances measures the corridor where the car happens to be.
+    Pooling thousands of those measurements says what the corridor really is -
+    and whether it is the 1000 mm the rulebook claims and geom.py assumes.
+    """
+    s = load_session(path)
+    scans = s["ranges"]
+    if not len(scans):
+        print("[fit] no data - record some laps first")
+        return
+    widths, lefts, rights, rmss, skew = [], [], [], [], []
+    for scan in scans:
+        L = _fit_line(_sector_points(scan, *LEFT_SECTOR))
+        R = _fit_line(_sector_points(scan, *RIGHT_SECTOR))
+        if L is None or R is None:
+            continue
+        dl, al, rl, _nl = L
+        dr, ar, rr, _nr = R
+        da = abs((al - ar + 90.0) % 180.0 - 90.0)
+        if da > PARALLEL_TOL_DEG:          # not a straight: a corner is in view
+            continue
+        widths.append(dl + dr)
+        lefts.append(dl)
+        rights.append(dr)
+        rmss.append(0.5 * (rl + rr))
+        skew.append(da)
+
+    if len(widths) < 20:
+        print(f"[fit] only {len(widths)} usable scans - drive more laps")
+        return
+    w = np.array(widths)
+    print(f"\n[fit] {len(scans)} revolutions, {len(w)} usable "
+          f"(the rest had a corner in view)")
+    print(f"      corridor width : median {np.median(w):7.1f} mm   "
+          f"IQR {np.percentile(w,25):.0f}-{np.percentile(w,75):.0f}   "
+          f"p10-p90 {np.percentile(w,10):.0f}-{np.percentile(w,90):.0f}")
+    print(f"      left / right   : {np.median(lefts):7.1f} / "
+          f"{np.median(rights):.1f} mm (median)")
+    print(f"      wall flatness  : {np.median(rmss):7.1f} mm rms residual "
+          f"(how straight the walls fit)")
+    print(f"      wall skew      : {np.median(skew):7.2f} deg between the two")
+    assumed = 1000.0
+    err = np.median(w) - assumed
+    print(f"\n      geom.py assumes CORRIDOR = {assumed:.0f} mm -> measured is "
+          f"{err:+.1f} mm {'WIDER' if err > 0 else 'NARROWER'}")
+    if abs(err) < 15:
+        print("      within +/-15 mm: the rulebook figure is good, keep it.")
+    else:
+        print("      OUTSIDE +/-15 mm: set CORRIDOR in nav/geom.py to the "
+              "measured value before trusting any map-based pose.")
+
+
 # --------------------------------------------------------------- storage
 def load_session(path):
     if not os.path.exists(path):
         return {"ranges": np.empty((0, 360)), "raw": np.empty((0, 360)),
-                "t": np.empty(0), "run": np.empty(0, dtype=np.int32)}
+                "t": np.empty(0), "run": np.empty(0, dtype=np.int32),
+                "heading": np.empty(0), "ticks": np.empty(0)}
     d = np.load(path)
     out = {k: d[k] for k in ("ranges", "t", "run")}
     # older sessions have no raw copy; fall back to the cleaned one
     out["raw"] = d["raw"] if "raw" in d.files else out["ranges"]
+    for k in ("heading", "ticks"):
+        out[k] = d[k] if k in d.files else np.full(len(out["t"]), np.nan)
     return out
 
 
-def save_session(path, old, ranges, raws, ts, run_id):
+def save_session(path, old, ranges, raws, ts, heads, ticks, run_id):
     if not ranges:
         print("[cal] nothing new to save")
         return
@@ -110,6 +240,8 @@ def save_session(path, old, ranges, raws, ts, run_id):
                                                # mistake never costs a re-drive
         t=np.concatenate([old["t"], new_t]) if len(old["t"]) else new_t,
         run=np.concatenate([old["run"], new_run]) if len(old["run"]) else new_run,
+        heading=np.concatenate([old["heading"], np.asarray(heads, dtype=np.float64)]),
+        ticks=np.concatenate([old["ticks"], np.asarray(ticks, dtype=np.float64)]),
     )
     total = len(old["ranges"]) + len(new_r)
     print(f"[cal] saved {len(new_r)} new revolutions (run {run_id}) -> {path}")
@@ -144,10 +276,15 @@ def main():
     ap.add_argument("--port", default=None)
     ap.add_argument("--tol", type=int, default=None)
     ap.add_argument("--status", action="store_true")
+    ap.add_argument("--fit", action="store_true",
+                    help="STEP 2: fit the corridor walls from the recorded laps")
     args = ap.parse_args()
 
     if args.status:
         status(args.out)
+        return
+    if args.fit:
+        fit_walls(args.out)
         return
 
     old = load_session(args.out)
@@ -186,13 +323,14 @@ def main():
 
     print(f"[cal] run {run_id} -> {args.out}. KEEP THE MAT EMPTY. Ctrl-C to stop.")
 
-    ranges, raws, ts = [], [], []
+    ranges, raws, ts, heads, ticks = [], [], [], [], []
     n_dropped, n_rejected = [0], [0]
     period = 1.0 / SEND_HZ
     t0 = time.time()
     last_rev = -1
     last_log = time.monotonic()
     rx = b""
+    tel_head, tel_odo, tel_count = [np.nan], [np.nan], [0]
     try:
         while True:
             if args.secs and (time.time() - t0) >= args.secs:
@@ -214,6 +352,8 @@ def main():
                         ranges.append(clean)
                         raws.append(scan)
                         ts.append(time.time() - t0)
+                        heads.append(tel_head[0])
+                        ticks.append(tel_odo[0])
                         n_dropped[0] += dropped
                     else:
                         n_rejected[0] += 1
@@ -231,8 +371,10 @@ def main():
                         rx = b""
 
             if now - last_log >= 2.0:
-                print(f"[cal] {len(ranges):5d} revs captured  "
-                      f"{time.time() - t0:5.1f}s"
+                od = "-" if np.isnan(tel_odo[0]) else f"{int(tel_odo[0])}"
+                hd = "-" if np.isnan(tel_head[0]) else f"{tel_head[0]:.0f}"
+                print(f"[cal] {len(ranges):5d} revs  {time.time() - t0:5.1f}s  "
+                      f"telem {tel_count[0]}  hdg {hd}  odo {od}"
                       f"{'' if live else '   (LIDAR STALE)'}")
                 last_log = now
 
@@ -253,7 +395,7 @@ def main():
             print(f"[cal] outliers: dropped {n_dropped[0]} rays "
                   f"({100.0 * n_dropped[0] / max(1, kept + n_dropped[0]):.1f}%), "
                   f"rejected {n_rejected[0]} whole revolutions")
-        save_session(args.out, old, ranges, raws, ts, run_id)
+        save_session(args.out, old, ranges, raws, ts, heads, ticks, run_id)
         print("[cal] next: run it again for another lap, or "
               "`python calibrationmat.py --status` to see the total")
 
