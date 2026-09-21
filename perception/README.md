@@ -17,9 +17,21 @@ on three independent cues**, then take the best:
 | **Seats** | **along-corridor position** — an obstacle 900 mm ahead is only consistent with poses that put a *legal seat* 900 mm ahead | nothing: the seat grid is itself 4-fold symmetric |
 | **Parking** | *which* straight — two short lines close together hugging an outer wall exist in exactly one straight | narrows 4 → 2; the last 180° is symmetric too |
 
-Net: **absolute position up to the 4-fold rotation.** That last bit is not in the
-data — it comes from `--start N|E|S|W` (the rulebook gives you the start zone) or
-from motion. `fit()` *reports* the ambiguity rather than hiding it.
+**Driving direction needs no input.** Going clockwise the inner block sits on the
+car's right and the outer wall on its left; counter-clockwise is the mirror. That
+asymmetry is visible in one scan, so `fit()` infers `CW`/`CCW` itself and reports
+the margin it won by (typically +0.2 to +0.3; below 0.03 it says so).
+
+**Rotation (which of the four corridors) is NOT recoverable — and does not need to
+be.** A CCW car in the N corridor is indistinguishable from a CCW car in the E
+corridor. But nothing in the round depends on the label: passing red/green on the
+correct side, counting corners, and returning to the parking are all *relative* to
+the corridor and to landmarks the car detected itself. So the car adopts a
+self-consistent frame at start and drives. `--start N|E|S|W` is **cosmetic** — it
+only makes the on-screen corridor match how a human labels the mat.
+
+Net: **absolute position up to the 4-fold rotation**, with the rotation reported
+rather than hidden. Competition start-up is therefore zero-input.
 
 Three numbers you can read directly: `corridor_distances()` → front / left / right
 (left + right ≈ the 1000 mm corridor).

@@ -48,6 +48,20 @@ PARK_SEP_MIN_MM = 140.0               # 1.5 * car_len, for plausible car lengths
 PARK_SEP_MAX_MM = 520.0
 
 
+CW_HEAD = {"N": 0.0, "E": -90.0, "S": 180.0, "W": 90.0}
+
+
+def direction_of(side, th):
+    """'CW' or 'CCW' for a heading in a given straight.
+
+    Going clockwise the inner block sits on the car's RIGHT and the outer wall
+    on its LEFT; counter-clockwise is the mirror. That asymmetry is visible in
+    a single scan, which is why the driving direction needs no operator input.
+    """
+    d = (math.degrees(th) - CW_HEAD[side] + 180.0) % 360.0 - 180.0
+    return "CW" if abs(d) < 90.0 else "CCW"
+
+
 def canonical_start(side="S", cw=True):
     """Mid-corridor pose at the middle of a given straight, facing the driving
     direction. Because the mat is 4-fold symmetric, naming the straight is a
@@ -159,10 +173,14 @@ class FitResult:
     clusters: list = dc_field(default_factory=list)
     ambiguous_with: list = dc_field(default_factory=list)   # equal-scoring rotations
     notes: list = dc_field(default_factory=list)
+    direction: str = "?"          # 'CW' / 'CCW', inferred from the scan
+    dir_margin: float = 0.0       # winning sense score minus the other
 
     def explain(self):
         out = [f"pose ({self.pose[0]:.0f}, {self.pose[1]:.0f}, "
                f"{math.degrees(self.pose[2]):.1f} deg) on straight {self.side}",
+               f"  direction {self.direction}  (margin {self.dir_margin:+.2f}"
+               + ("  UNCERTAIN)" if abs(self.dir_margin) < 0.03 else ")"),
                f"  walls   {self.wall:.2f}",
                f"  seats   {self.seat:.2f}  ({self.hits} on-seat, {self.orphans} orphan)",
                f"  parking {self.park:.2f}" + ("  FOUND" if self.parking else ""),
@@ -187,6 +205,7 @@ def fit(ranges, field: DistanceField, matcher: ScanMatcher,
 
     # ---- pass A: wall score over all hypotheses ----
     cand = []
+    sense_best = {True: 0.0, False: 0.0}      # best wall score per driving sense
     for side in sides:
         for sense in senses:
             bx, by, bth = canonical_start(side, sense)
@@ -196,6 +215,8 @@ def fit(ranges, field: DistanceField, matcher: ScanMatcher,
                                              sensor_ahead)
                 if sc > 0.0:
                     cand.append((sc, side, (x, y, th)))
+                    if sc > sense_best[sense]:
+                        sense_best[sense] = sc
     if not cand:
         return None
     cand.sort(key=lambda c: c[0], reverse=True)
@@ -223,6 +244,19 @@ def fit(ranges, field: DistanceField, matcher: ScanMatcher,
                                  clusters=clusters))
     results.sort(key=lambda f: f.total, reverse=True)
     best = results[0]
+
+    # driving direction: which way round the loop the winning pose faces, and
+    # how decisively the scan preferred that sense over its opposite
+    best.direction = direction_of(best.side, best.pose[2])
+    if len(senses) == 2:
+        won = sense_best[best.direction == "CW"]
+        lost = sense_best[best.direction != "CW"]
+        best.dir_margin = won - lost
+        if abs(best.dir_margin) < 0.03:
+            best.notes.append("driving direction is not decisive from this "
+                              "scan - move a little, or approach a corner")
+    else:
+        best.notes.append("driving direction was forced, not inferred")
 
     # be honest about rotations that scored the same
     for other in results[1:]:

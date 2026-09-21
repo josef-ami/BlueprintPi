@@ -59,6 +59,18 @@ def test_parking_pattern_is_two_close_lines_on_an_outer_wall():
     assert none is None
 
 
+@pytest.mark.parametrize("heading_deg,expect", [(0.0, "CCW"), (180.0, "CW")])
+def test_direction_is_inferred_with_no_operator_input(heading_deg, expect):
+    """Competition case: nothing is supplied. The inner block sits on a
+    different side depending on travel direction, so one scan settles it."""
+    sc = sim.Scenario(pillars={"S1": RED}, parking_side="S", parking_along=0.0)
+    for along in (-400.0, 0.0, 400.0):
+        r = _scan((along, -1000.0, math.radians(heading_deg)), sc, seed=1)
+        res = WorldBelief().fit_start(r)          # no start, no direction hint
+        assert res.direction == expect
+        assert abs(res.dir_margin) > 0.05
+
+
 def test_full_search_reports_rotational_ambiguity():
     """Honesty check: with all four straights allowed, a symmetric scene must
     say it is ambiguous rather than claim a corridor it cannot know."""
