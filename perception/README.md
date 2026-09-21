@@ -6,6 +6,24 @@ localization** (correlative scan-matching against a known occupancy matrix) plus
 a **semantic layer** (which seats hold pillars, what colour, where the parking
 bay is) — not SLAM.
 
+## The start-up fit (`perception/fit.py`)
+
+Don't trust a guessed pose — **generate every pose the arena allows and score each
+on three independent cues**, then take the best:
+
+| Cue | What it gives | What it can't |
+|---|---|---|
+| **Walls** | lateral offset + heading, always | 4-fold ambiguous; weak along a long corridor |
+| **Seats** | **along-corridor position** — an obstacle 900 mm ahead is only consistent with poses that put a *legal seat* 900 mm ahead | nothing: the seat grid is itself 4-fold symmetric |
+| **Parking** | *which* straight — two short lines close together hugging an outer wall exist in exactly one straight | narrows 4 → 2; the last 180° is symmetric too |
+
+Net: **absolute position up to the 4-fold rotation.** That last bit is not in the
+data — it comes from `--start N|E|S|W` (the rulebook gives you the start zone) or
+from motion. `fit()` *reports* the ambiguity rather than hiding it.
+
+Three numbers you can read directly: `corridor_distances()` → front / left / right
+(left + right ≈ the 1000 mm corridor).
+
 ## The idea
 
 1. **The matrix is known.** `nav/geom.py` holds the walls (two concentric

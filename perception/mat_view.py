@@ -118,11 +118,12 @@ class LiveSource(threading.Thread):
 
     daemon = True
 
-    def __init__(self, guess=None, cw=True, hz=10.0):
+    def __init__(self, guess=None, cw=None, hz=10.0, sides=("N", "E", "S", "W")):
         super().__init__()
         self.hz = hz
-        self.guess = guess          # None -> auto-init from the parking bay
-        self.cw = cw
+        self.guess = guess          # None -> systematic fit_start
+        self.cw_hint = cw           # None -> work the direction out from the scan
+        self.sides = sides          # restrict to one straight to fix the rotation
         self._stop = threading.Event()
         self.wb = WorldBelief(sensor_ahead=0.0)
 
@@ -147,12 +148,10 @@ class LiveSource(threading.Thread):
                     _p, sc = self.wb.global_init(ranges, guess=self.guess)
                     first = sc <= 0.0            # retry until a real fix lands
                 else:
-                    side, sc, seen = self.wb.auto_init(ranges, cw=self.cw)
-                    first = side is None or sc <= 0.0
-                    if not first:
-                        print(f"auto-init: start straight = {side}  score {sc:.2f}  "
-                              f"parking {'CONFIRMED' if seen else 'not seen'} "
-                              f"(±180° flip from a static scan; drive or --guess to pin)")
+                    res = self.wb.fit_start(ranges, cw=self.cw_hint, sides=self.sides)
+                    first = res is None
+                    if res is not None:
+                        print("=== START FIT ===\n" + res.explain())
                 if first:
                     continue                    # empty/spin-up scan, wait
             else:
@@ -197,7 +196,10 @@ def main():
     ap.add_argument("--static", action="store_true", help="sim: park in one spot")
     ap.add_argument("--live", action="store_true", help="real RPLidar on the Pi")
     ap.add_argument("--guess", help="x,y,deg  (override auto-init with an explicit pose)")
-    ap.add_argument("--ccw", action="store_true", help="counter-clockwise (default: clockwise)")
+    ap.add_argument("--cw", action="store_true", help="force clockwise (default: infer from the scan)")
+    ap.add_argument("--ccw", action="store_true", help="force counter-clockwise")
+    ap.add_argument("--start", choices=["N","E","S","W"],
+                    help="which straight the car starts in (resolves the rotation)")
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8080)
     ap.add_argument("--seed", type=int, default=1)
@@ -208,8 +210,10 @@ def main():
         gx, gy, gd = (float(v) for v in args.guess.split(","))
         guess = (gx, gy, math.radians(gd))
 
+    cw_hint = True if args.cw else (False if args.ccw else None)
     if args.live:
-        src = LiveSource(guess=guess, cw=not args.ccw)
+        sides = (args.start,) if args.start else ("N", "E", "S", "W")
+        src = LiveSource(guess=guess, cw=cw_hint, sides=sides)
     else:
         src = SimSource(static=args.static, seed=args.seed)
     src.start()

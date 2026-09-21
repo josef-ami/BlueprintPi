@@ -66,18 +66,7 @@ class SeatBelief:
         return float(min(1.0, abs(self.logodds) / LOGODDS_CLAMP))
 
 
-def canonical_start(side="S", cw=True):
-    """The canonical start pose for a given start straight and driving
-    direction, mid-corridor at the side's mid-point. Because the mat is
-    4-fold symmetric, declaring the start straight is a free choice - this
-    just gives a consistent frame so no numeric guess is needed."""
-    cc = arena.CORRIDOR_CENTER
-    pos = {"N": (0.0, cc), "E": (cc, 0.0), "S": (0.0, -cc), "W": (-cc, 0.0)}
-    cw_head = {"N": 0.0, "E": -90.0, "S": 180.0, "W": 90.0}   # clockwise
-    th = cw_head[side] + (0.0 if cw else 180.0)
-    th = (th + 180.0) % 360.0 - 180.0
-    x, y = pos[side]
-    return (x, y, math.radians(th))
+from perception.fit import canonical_start, fit as _fit, corridor_distances  # noqa: E402
 
 
 class WorldBelief:
@@ -99,6 +88,7 @@ class WorldBelief:
         self.score = 0.0
         self.parking = None            # arena.ParkingBay once located
         self.unclassified = []         # non-seat detections (parking/noise)
+        self.last_fit = None           # perception.fit.FitResult from fit_start
         self._t0 = time.time()
 
     @property
@@ -152,6 +142,29 @@ class WorldBelief:
         return self.filter.healthy
 
     # ---- localization ----
+    def fit_start(self, ranges, cw=None, car_len_mm=175.0,
+                  sides=("N", "E", "S", "W")):
+        """Systematic start-up fit: score every allowed pose on walls + seats +
+        parking and take the best. This is the recommended first fix - it needs
+        no guess, works out the driving direction, and uses the obstacles
+        themselves to pin the along-corridor position.
+
+        Returns the fit.FitResult (or None if the scan was unusable).
+        """
+        if valid_count(ranges) < MIN_VALID:
+            return None
+        res = _fit(ranges, self.field, self.matcher, cw=cw,
+                   car_len_mm=car_len_mm, sensor_ahead=self.sensor_ahead,
+                   sides=sides)
+        if res is None:
+            return None
+        self.filter.x, self.filter.y, self.filter.th = res.pose
+        self.score = res.wall
+        if res.parking is not None:
+            self.parking = res.parking
+        self.last_fit = res
+        return res
+
     def _grid_match(self, ranges, seeds):
         """Tight correlative match from every seed; return the best (sc,x,y,th).
         A dense grid of tight matches is far more reliable on a partial/occluded
@@ -326,6 +339,17 @@ class WorldBelief:
         if self.parking is not None:
             snap["parking"] = {"side": self.parking.side,
                                "rect": [round(v, 1) for v in self.parking.rect]}
+        if self.last_fit is not None:
+            f = self.last_fit
+            snap["fit"] = {"side": f.side, "wall": round(f.wall, 2),
+                           "seat": round(f.seat, 2), "park": round(f.park, 2),
+                           "total": round(f.total, 2),
+                           "hits": f.hits, "orphans": f.orphans,
+                           "ambiguous": f.ambiguous_with}
+        if ranges is not None:
+            d = corridor_distances(ranges)
+            snap["dist"] = {k: (round(v) if v is not None else None)
+                            for k, v in d.items()}
         if include_scan and ranges is not None:
             snap["scan"] = scan_points(self.pose, ranges)
         return snap

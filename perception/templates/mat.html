@@ -60,6 +60,25 @@
       </div>
     </div>
     <div class="card">
+      <h2>Corridor (mm)</h2>
+      <div class="kv">
+        <div>front</div><div class="v" id="dfront">–</div>
+        <div>left</div><div class="v" id="dleft">–</div>
+        <div>right</div><div class="v" id="dright">–</div>
+        <div>left+right</div><div class="v" id="dsum">–</div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Start fit</h2>
+      <div class="kv">
+        <div>straight</div><div class="v" id="fside">–</div>
+        <div>walls</div><div class="v" id="fwall">–</div>
+        <div>seats</div><div class="v" id="fseat">–</div>
+        <div>parking</div><div class="v" id="fpark">–</div>
+      </div>
+      <div class="hint" id="famb" style="font-size:11px;color:var(--dim);margin-top:6px"></div>
+    </div>
+    <div class="card">
       <h2>Legend</h2>
       <div class="legend">
         <span><span class="sw" style="background:var(--wall)"></span>wall</span>
@@ -129,6 +148,14 @@ function draw(d){
   set('px',d.pose?d.pose.x:'–'); set('py',d.pose?d.pose.y:'–');
   set('pth',d.pose?d.pose.th_deg+'°':'–'); set('score',d.score);
   set('npts',d.scan?d.scan.length:'–');
+  const D=d.dist||{};
+  set('dfront',D.front); set('dleft',D.left); set('dright',D.right);
+  set('dsum',(D.left!=null&&D.right!=null)?(D.left+D.right):'–');
+  const F=d.fit;
+  if(F){set('fside',F.side); set('fwall',F.wall);
+    set('fseat',F.seat+' ('+F.hits+' on-seat)'); set('fpark',F.park?'found':'not seen');
+    document.getElementById('famb').textContent =
+      (F.ambiguous&&F.ambiguous.length)?('rotation ambiguous with: '+F.ambiguous.join(', ')):'';}
   const dec=(d.seats||[]).filter(s=>s.state!=='unknown');
   set('decided',dec.length);
   const tb=document.getElementById('seats'); tb.innerHTML='';

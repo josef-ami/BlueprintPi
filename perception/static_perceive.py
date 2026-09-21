@@ -95,7 +95,7 @@ def _live_source():
     return gen(), None, None        # no ground-truth scenario for live
 
 
-def run(source, guess, frames=12, cw=True):
+def run(source, guess, frames=12, cw=True, sides=("N", "E", "S", "W")):
     gen, truth, sc = source
     wb = WorldBelief()
     inited = False
@@ -110,12 +110,11 @@ def run(source, guess, frames=12, cw=True):
             _p, isc = wb.global_init(ranges, guess=guess)
             inited = isc > 0.0
         else:
-            init_side, isc, seen = wb.auto_init(ranges, cw=cw)
-            inited = init_side is not None and isc > 0.0
+            res = wb.fit_start(ranges, cw=cw, sides=sides)
+            inited = res is not None
             if inited:
-                print(f"auto-init: start straight = {init_side}  score {isc:.2f}  "
-                      f"parking {'CONFIRMED' if seen else 'not seen (fell back)'} "
-                      f"(±180° from a static scan)")
+                print("=== START FIT (walls + seats + parking) ===")
+                print(res.explain())
         if inited:
             wb.update(ranges, cam_dets=cam)
             last_ranges = ranges
@@ -162,12 +161,15 @@ def main():
     ap.add_argument("--replay", metavar="NPZ")
     ap.add_argument("--live", action="store_true")
     ap.add_argument("--guess", help="x,y,deg  (override auto-init with an explicit pose)")
-    ap.add_argument("--ccw", action="store_true", help="counter-clockwise (default: clockwise)")
+    ap.add_argument("--cw", action="store_true", help="force clockwise (default: infer from the scan)")
+    ap.add_argument("--ccw", action="store_true", help="force counter-clockwise")
+    ap.add_argument("--start", choices=["N","E","S","W"],
+                    help="which straight the car starts in (resolves the rotation)")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--frames", type=int, default=12)
     args = ap.parse_args()
 
-    cw = not args.ccw
+    cw = True if args.cw else (False if args.ccw else None)
     guess = parse_guess(args.guess)      # None -> auto-init from the parking bay
     if args.replay:
         src = _replay_source(args.replay)
@@ -178,7 +180,8 @@ def main():
         # start straight so auto-init has something to lock onto
         src = _sim_source(args.seed, guess)
 
-    wb, ranges, truth, sc = run(src, guess, frames=args.frames, cw=cw)
+    sides = (args.start,) if args.start else ("N", "E", "S", "W")
+    wb, ranges, truth, sc = run(src, guess, frames=args.frames, cw=cw, sides=sides)
     report(wb, truth=truth, sc=sc)
 
 
