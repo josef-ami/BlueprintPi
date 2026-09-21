@@ -177,19 +177,22 @@ function draw(d){
     const e=document.getElementById('nstate');
     if(e) e.style.color = N.state==='LOCKED' ? 'var(--green)'
         : (N.state==='LOST' ? 'var(--red)' : 'var(--dim)');}
-  const T=d.telem;
-  const th=document.getElementById('thint');
-  if(T){set('tfr',T.frames+' / '+T.bad); set('timu',T.imu_ok?'OK':'no fix');
-    set('thd',T.heading_deg==null?'–':T.heading_deg+'°');
-    set('todo',T.odo_ticks==null?'–':T.odo_ticks);
+  // NB: do NOT name anything in here 'T' - that is the coordinate transform,
+  // and a const of the same name puts it in the temporal dead zone for the
+  // whole of draw(), which breaks every T() call above this line.
+  const TEL=d.telem;
+  const thint=document.getElementById('thint');
+  if(TEL){set('tfr',TEL.frames+' / '+TEL.bad); set('timu',TEL.imu_ok?'OK':'no fix');
+    set('thd',TEL.heading_deg==null?'–':TEL.heading_deg+'°');
+    set('todo',TEL.odo_ticks==null?'–':TEL.odo_ticks);
     const ei=document.getElementById('timu');
-    if(ei) ei.style.color=T.imu_ok?'var(--green)':'var(--red)';
-    if(th) th.textContent = T.frames===0
+    if(ei) ei.style.color=TEL.imu_ok?'var(--green)':'var(--red)';
+    if(thint) thint.textContent = TEL.frames===0
       ? 'no frames yet — check the STM32 is powered and on the right port'
-      : (T.bad>T.frames*0.1 ? 'many bad frames — check baud / wiring' : '');
+      : (TEL.bad>TEL.frames*0.1 ? 'many bad frames — check baud / wiring' : '');
   } else {
     set('tfr','off'); set('timu','–'); set('thd','–'); set('todo','–');
-    if(th) th.textContent='not enabled — start with --telemetry to use IMU+encoder';
+    if(thint) thint.textContent='not enabled — start with --telemetry to use IMU+encoder';
   }
   const D=d.dist||{};
   set('dfront',D.front); set('dleft',D.left); set('dright',D.right);
@@ -216,7 +219,20 @@ es.onopen=()=>{document.getElementById('live-dot').style.background='#30a46c';
   document.getElementById('status').lastChild.textContent='live';};
 es.onerror=()=>{document.getElementById('live-dot').style.background='#e5484d';
   document.getElementById('status').lastChild.textContent='reconnecting…';};
-es.onmessage=e=>{try{const d=JSON.parse(e.data); if(d.mode)set('mode',d.mode); draw(d);}catch(err){}};
+es.onmessage=e=>{
+  let d;
+  try{ d=JSON.parse(e.data); }
+  catch(err){ console.error('mat: bad SSE payload', err); return; }
+  if(d.mode) set('mode', d.mode);
+  // Do NOT swallow render errors: a silent catch here once left the walls
+  // drawn and every other field blank, with nothing in the console to say why.
+  try{ draw(d); }
+  catch(err){
+    console.error('mat: draw() failed', err);
+    const s=document.getElementById('status');
+    if(s && s.lastChild) s.lastChild.textContent='render error - see console';
+  }
+};
 </script>
 </body>
 </html>
