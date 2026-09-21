@@ -86,6 +86,20 @@ class Seat:
     along: float
     lat: float
 
+    @property
+    def station(self):
+        """(side, along) - the 'line' across the corridor this seat sits on.
+
+        RULEBOOK (2026 game rules, p.14): the signs in each straightforward
+        section are drawn from a set of 36 cards, one card per section. A card
+        never puts two signs on the same line, and it could not: the car must
+        pass a red sign on its right and a green one on its left, so two signs
+        abreast would be impossible to satisfy. Therefore AT MOST ONE seat per
+        station may be occupied, and two detections on one line mean something
+        else is there - most often the two parking blocks seen end-on.
+        """
+        return (self.side, self.along)
+
 
 def build_seats() -> list[Seat]:
     seats: list[Seat] = []
@@ -101,6 +115,17 @@ def build_seats() -> list[Seat]:
 
 SEATS: list[Seat] = build_seats()
 _SEAT_XY = np.array([[s.x, s.y] for s in SEATS], dtype=np.float64)
+
+# seats grouped by the line they sit on; at most one of each group is legal
+SEATS_BY_STATION: dict[tuple, list[Seat]] = {}
+for _s in SEATS:
+    SEATS_BY_STATION.setdefault(_s.station, []).append(_s)
+
+
+def rivals(seat: Seat) -> list[Seat]:
+    """The other seats on the same line, which therefore cannot also hold a
+    sign (see Seat.station)."""
+    return [s for s in SEATS_BY_STATION[seat.station] if s.id != seat.id]
 
 
 def nearest_seat(x: float, y: float, tol: float = SNAP_TOL_MM):

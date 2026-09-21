@@ -78,3 +78,37 @@ def test_full_search_reports_rotational_ambiguity():
     res = WorldBelief().fit_start(_scan((-200.0, -1000.0, 0.0), sc))
     assert res is not None
     assert res.ambiguous_with, "a 4-fold symmetric mat must report ambiguity"
+
+
+def test_parking_survives_the_pillar_width_cap():
+    """pillarmap.extract() drops clusters wider than 130 mm because it hunts
+    50 mm signs; a parking block is 200 mm long. Parking must therefore be
+    found from the raw points, not from pillar clusters."""
+    from perception.state import WorldBelief
+    for side, along in (("S", 0.0), ("N", 150.0), ("E", -200.0)):
+        sc = sim.Scenario(pillars={}, parking_side=side, parking_along=along)
+        cc = arena.CORRIDOR_CENTER
+        pose = {"S": (along, -cc, 0.0), "N": (along, cc, math.pi),
+                "E": (cc, along, math.pi / 2), "W": (-cc, along, -math.pi / 2)}[side]
+        r = _scan(pose, sc)
+        bay = fitmod.find_parking_points(r, pose, WorldBelief().field)
+        assert bay is not None, f"no bay found on {side}"
+        assert bay.side == side
+        assert abs(bay.along_center - along) < 200
+
+
+def test_parking_returns_are_not_stolen_by_seats():
+    from perception.state import WorldBelief
+    from nav import arena as A
+    sc = sim.Scenario(pillars={"S1": RED}, parking_side="S", parking_along=0.0)
+    lx, ly = 130.0, -A.CORRIDOR_CENTER
+    wb = WorldBelief(sensor_ahead=130.0)
+    wb.fit_start(_scan((lx, ly, 0.0), sc), sides=("S",))
+    for i in range(8):
+        r = _scan((lx, ly, 0.0), sc, seed=i)
+        wb.track(r)
+        wb.update(r)
+    occ = {s["id"] for s in wb.snapshot()["seats"]
+           if s["state"] not in ("unknown", "empty")}
+    assert occ == {"S1"}, f"parking leaked into seats: {occ}"
+    assert wb.parking is not None and wb.parking.side == "S"
