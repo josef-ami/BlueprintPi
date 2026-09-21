@@ -141,6 +141,64 @@ function walls(a){
 }
 function getCss(v){return getComputedStyle(document.documentElement).getPropertyValue(v).trim();}
 
+// ---- hover readout -------------------------------------------------------
+// Range and bearing are recomputed from the SENSOR origin (the LiDAR, which
+// sits ahead of the vehicle point), not from the pose - otherwise the numbers
+// under the cursor would disagree with what the scanner actually measured.
+let lastD = null, hover = null;
+const HOVER_PX = 12;
+
+function canvasXY(e){
+  const rc = cv.getBoundingClientRect();
+  return [(e.clientX-rc.left) * (cv.width/rc.width),
+          (e.clientY-rc.top)  * (cv.height/rc.height)];
+}
+function wrap180(a){ return (a+540)%360 - 180; }
+
+function pickScanPoint(mx, my, d){
+  if(!d || !d.scan || !d.scan.length) return null;
+  const org = d.sensor || d.pose; if(!org) return null;
+  let best=null, bestd=HOVER_PX*HOVER_PX;
+  for(const p of d.scan){
+    const [px,py]=T(p[0],p[1]);
+    const dd=(px-mx)*(px-mx)+(py-my)*(py-my);
+    if(dd<bestd){ bestd=dd; best=p; }
+  }
+  if(!best) return null;
+  const dx=best[0]-org.x, dy=best[1]-org.y;
+  const range=Math.hypot(dx,dy);
+  const bearing=wrap180(Math.atan2(dy,dx)*180/Math.PI - (org.th_deg||0));
+  const [sx,sy]=T(best[0],best[1]);
+  return {x:best[0], y:best[1], sx, sy, range, bearing};
+}
+
+function drawHover(){
+  if(!hover) return;
+  ctx.strokeStyle='#ffffff'; ctx.lineWidth=1.5;
+  ctx.beginPath(); ctx.arc(hover.sx,hover.sy,7,0,7); ctx.stroke();
+  const lines=[`${hover.range.toFixed(0)} mm  @ ${hover.bearing.toFixed(1)}°`,
+               `(${hover.x.toFixed(0)}, ${hover.y.toFixed(0)}) mat`];
+  ctx.font='12px ui-sans-serif,system-ui,sans-serif';
+  const w=Math.max(...lines.map(l=>ctx.measureText(l).width))+14, h=36;
+  let bx=hover.sx+12, by=hover.sy-h-8;
+  if(bx+w>cv.width) bx=hover.sx-w-12;
+  if(by<0) by=hover.sy+12;
+  ctx.fillStyle='rgba(12,15,20,.92)'; ctx.strokeStyle='#3a4150';
+  ctx.fillRect(bx,by,w,h); ctx.strokeRect(bx,by,w,h);
+  ctx.fillStyle='#e6e9ee'; ctx.fillText(lines[0], bx+7, by+15);
+  ctx.fillStyle='#8b93a1'; ctx.fillText(lines[1], bx+7, by+29);
+}
+
+cv.addEventListener('mousemove', e=>{
+  const [mx,my]=canvasXY(e);
+  const h=pickScanPoint(mx,my,lastD);
+  const changed = (!!h)!==(!!hover) || (h&&hover&&(h.sx!==hover.sx||h.sy!==hover.sy));
+  hover=h;
+  cv.style.cursor = h ? 'crosshair' : 'default';
+  if(changed && lastD) draw(lastD);          // redraw now, don't wait for SSE
+});
+cv.addEventListener('mouseleave', ()=>{ hover=null; if(lastD) draw(lastD); });
+
 function draw(d){
   ctx.clearRect(0,0,cv.width,cv.height);
   if(!d || !d.arena) return;
@@ -176,6 +234,8 @@ function draw(d){
     ctx.save(); ctx.translate(cx,cy); ctx.rotate(-th); ctx.fillStyle=getCss('--pose');
     ctx.beginPath(); ctx.moveTo(14,0); ctx.lineTo(-8,7); ctx.lineTo(-8,-7); ctx.closePath(); ctx.fill();
     ctx.restore();}
+  drawHover();
+  drawHover();                 // last, so the readout sits on top
   // panel
   set('px',d.pose?d.pose.x:'–'); set('py',d.pose?d.pose.y:'–');
   set('pth',d.pose?d.pose.th_deg+'°':'–'); set('score',d.score);
@@ -237,6 +297,10 @@ es.onmessage=e=>{
   try{ d=JSON.parse(e.data); }
   catch(err){ console.error('mat: bad SSE payload', err); return; }
   if(d.mode) set('mode', d.mode);
+  lastD = d;                                   // hover can redraw between frames
+  if(hover) hover = pickScanPoint(hover.sx, hover.sy, d);   // re-latch on fresh data
+  lastD = d;
+  if(hover) hover = pickScanPoint(hover.sx, hover.sy, d);
   // Do NOT swallow render errors: a silent catch here once left the walls
   // drawn and every other field blank, with nothing in the console to say why.
   try{ draw(d); }

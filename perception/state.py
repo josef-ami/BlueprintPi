@@ -104,6 +104,18 @@ class WorldBelief:
     def pose(self):
         return (self.filter.x, self.filter.y, self.filter.th)
 
+    @property
+    def sensor_pose(self):
+        """Where the LiDAR actually is: the vehicle point pushed forward by
+        sensor_ahead. Every projection of a RANGE into the mat frame must start
+        here, not at the vehicle point - nav/service.py has always done this
+        (lx, ly = px + lidar_ahead*c, ...). Using the vehicle point instead put
+        every extracted obstacle, tower and drawn scan point 130 mm behind
+        where it really is."""
+        x, y, th = self.pose
+        return (x + self.sensor_ahead * math.cos(th),
+                y + self.sensor_ahead * math.sin(th), th)
+
     def auto_init(self, ranges, cw=True, sides=("N", "E", "S", "W")):
         """Self-localize with NO numeric guess - only the driving direction.
 
@@ -272,7 +284,7 @@ class WorldBelief:
         # In this map-based design a legal sign only ever stands on a SEAT, so
         # keep detections that snap to one; the rest (parking blocks, noise)
         # are held separately for the parking detector and debugging.
-        dets_all = extract(list(r), self.pose, self.field)
+        dets_all = extract(list(r), self.sensor_pose, self.field)
 
         # PARKING IS CLAIMED FIRST. The two magenta blocks sit against the outer
         # wall and, seen end-on, look exactly like a pair of small pillars - so
@@ -280,7 +292,7 @@ class WorldBelief:
         # would never be found. Claim the parking pattern, then let the seats
         # have whatever is genuinely left.
         car_len = self.parking.car_len_mm if self.parking else 175.0
-        bay = fit_parking_points(list(r), self.pose, self.field, car_len)
+        bay = fit_parking_points(list(r), self.sensor_pose, self.field, car_len)
         if bay is None:                      # fall back to the centroid pattern
             bay, _used = fit_parking(dets_all, car_len)
         # vote rather than overwrite: the bay is fixed for the round, so a
@@ -297,7 +309,7 @@ class WorldBelief:
         # residue. It is also what keeps the parking blocks out: flush to the
         # wall, their valley is too shallow to qualify.
         towers = find_towers(list(r))
-        tpts = tower_points(list(r), self.pose, towers)
+        tpts = tower_points(list(r), self.sensor_pose, towers)
         self.towers = tpts
 
         # MEASURED POSITION IS THE TRUTH, not a seat index.
@@ -361,7 +373,7 @@ class WorldBelief:
                 loser.color = UNKNOWN
 
     def _update_seats(self, r):
-        x0, y0, th = self.pose
+        x0, y0, th = self.sensor_pose
         finite = np.isfinite(r)
         if finite.sum() < 10:
             return
@@ -404,6 +416,9 @@ class WorldBelief:
         snap = {
             "pose": {"x": round(x, 1), "y": round(y, 1), "th_deg": round(th_deg, 2)},
             "score": round(self.score, 3),
+            "sensor": {"x": round(self.sensor_pose[0], 1),
+                       "y": round(self.sensor_pose[1], 1),
+                       "th_deg": round(th_deg, 2)},
             "seats": seats,
             "pillars": [{"x": round(p.x, 1), "y": round(p.y, 1),
                          "color": _COLOR_NAME.get(p.color, "unknown")}
@@ -427,7 +442,7 @@ class WorldBelief:
             snap["dist"] = {k: (round(v) if v is not None else None)
                             for k, v in d.items()}
         if include_scan and ranges is not None:
-            snap["scan"] = scan_points(self.pose, ranges)
+            snap["scan"] = scan_points(self.sensor_pose, ranges)
         return snap
 
 
