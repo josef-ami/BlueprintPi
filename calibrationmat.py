@@ -320,6 +320,161 @@ def draw_map(path, out="mat_map.png", stride=2, max_scans=1200):
     print(f"[draw] wrote {out}")
 
 
+# ------------------------------------------- build the map, pixel by pixel
+GRID_MM = 10.0                 # one pixel
+GRID_HALF = 2000.0             # half-extent of the canvas
+
+
+def lap_segments(heading, ticks, run):
+    """Split the session into individual laps.
+
+    Heading is absolute from the IMU, so unwrapping it and counting whole turns
+    gives lap boundaries directly - no map and no pose needed. Runs are kept
+    apart because the encoder restarts and the car is re-placed between them.
+    """
+    segs = []
+    for r in np.unique(run):
+        idx = np.where((run == r) & np.isfinite(heading) & np.isfinite(ticks))[0]
+        if len(idx) < 50:
+            continue
+        h = np.unwrap(np.radians(heading[idx]))
+        turns = (h - h[0]) / (2 * math.pi)
+        for lap in range(int(abs(turns).max()) + 1):
+            m = (np.abs(turns) >= lap) & (np.abs(turns) < lap + 1)
+            if m.sum() >= 50:
+                segs.append(idx[m])
+    return segs
+
+
+def _min_area_rect(P):
+    """Rotation and centre of the tightest rectangle around P.
+
+    The arena IS a rectangle, so the orientation that minimises the bounding
+    box is its orientation, and that box's centre is its centre. This is what
+    lets separately-drifted laps be brought onto each other without knowing
+    where any of them actually started.
+    """
+    best = None
+    for deg in np.arange(0.0, 90.0, 0.5):
+        a = math.radians(deg)
+        c, s = math.cos(a), math.sin(a)
+        x = P[:, 0] * c + P[:, 1] * s
+        y = -P[:, 0] * s + P[:, 1] * c
+        lo = np.percentile(np.stack([x, y], 1), 1.0, axis=0)
+        hi = np.percentile(np.stack([x, y], 1), 99.0, axis=0)
+        area = float((hi[0] - lo[0]) * (hi[1] - lo[1]))
+        if best is None or area < best[0]:
+            mid = 0.5 * (lo + hi)
+            best = (area, deg, mid, hi - lo)
+    _a, deg, mid, size = best
+    a = math.radians(deg)
+    c, s = math.cos(a), math.sin(a)
+    cx = mid[0] * c - mid[1] * s          # centre back in the original frame
+    cy = mid[0] * s + mid[1] * c
+    return deg, np.array([cx, cy]), size
+
+
+def scan_cloud(R, H, X, Y, idx, stride=2):
+    """Points of the given revolutions, placed by their pose."""
+    out = []
+    bins = np.arange(360)
+    for i in idx:
+        sc = R[i]
+        o = np.isfinite(sc)
+        ii = bins[o][::stride]
+        rr = sc[o][::stride]
+        aa = np.radians(ii.astype(np.float64)) + math.radians(H[i])
+        out.append(np.stack([X[i] + rr * np.cos(aa),
+                             Y[i] + rr * np.sin(aa)], axis=1))
+    return np.vstack(out) if out else np.empty((0, 2))
+
+
+def build_map(path, out="mat_grid.png", npy="mat_grid.npy"):
+    """Stitch every lap onto a common centre and accumulate a pixel map."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    s = load_session(path)
+    R, H, K, run = s["ranges"], s["heading"], s["ticks"], s["run"]
+    segs = lap_segments(H, K, run)
+    if not segs:
+        print("[build] no laps with odometry - flash firmware/OpenRound.cpp")
+        return
+    print(f"[build] {len(segs)} laps found")
+
+    n = int(2 * GRID_HALF / GRID_MM)
+    grid = np.zeros((n, n), dtype=np.float32)
+    kept = 0
+    for k, idx in enumerate(segs):
+        X, Y = deadreckon(H, K)                  # whole-session path
+        P = scan_cloud(R, H, X, Y, idx)
+        if len(P) < 500:
+            continue
+        deg, ctr, size = _min_area_rect(P)
+        # normalise: centre it, then rotate its walls onto the axes
+        Q = P - ctr
+        a = math.radians(-deg)
+        c, si = math.cos(a), math.sin(a)
+        Q = np.stack([Q[:, 0] * c - Q[:, 1] * si,
+                      Q[:, 0] * si + Q[:, 1] * c], axis=1)
+        ix = ((Q[:, 0] + GRID_HALF) / GRID_MM).astype(int)
+        iy = ((Q[:, 1] + GRID_HALF) / GRID_MM).astype(int)
+        m = (ix >= 0) & (ix < n) & (iy >= 0) & (iy < n)
+        np.add.at(grid, (iy[m], ix[m]), 1.0)
+        kept += 1
+        print(f"   lap {k:2d}: {len(P):6d} pts  rect {size[0]:.0f}x{size[1]:.0f} mm"
+              f"  rot {deg:4.1f} deg")
+    print(f"[build] {kept} laps stitched")
+    np.save(npy, grid)
+
+    # ---- read the geometry back off the accumulated pixels ----
+    # The arena is a square annulus, so the Chebyshev radius max(|x|,|y|)
+    # collapses BOTH walls onto one axis: the inner block and the outer wall
+    # become two peaks. Anything between them is corner smear, which is why
+    # the two dominant well-separated peaks are taken rather than an average.
+    ys, xs = np.nonzero(grid)
+    if len(ys):
+        wgt = grid[ys, xs]
+        px = (xs * GRID_MM) - GRID_HALF
+        py = (ys * GRID_MM) - GRID_HALF
+        cheb = np.maximum(np.abs(px), np.abs(py))
+        hist, edges = np.histogram(cheb, bins=np.arange(0, 2000, GRID_MM),
+                                   weights=wgt)
+        ctr = 0.5 * (edges[1:] + edges[:-1])
+        inner_i = int(np.argmax(np.where(ctr < 900, hist, 0)))
+        outer_i = int(np.argmax(np.where(ctr > 1200, hist, 0)))
+        ih, oh = ctr[inner_i], ctr[outer_i]
+        print("\n[build] geometry read off the accumulated pixels:")
+        print(f"      inner block wall : {ih:7.1f} mm from centre "
+              f"-> block {2*ih:.0f} mm")
+        print(f"      outer wall       : {oh:7.1f} mm from centre "
+              f"-> arena {2*oh:.0f} mm")
+        print(f"      corridor width   : {oh - ih:7.1f} mm")
+        print(f"\n      geom.py assumes   OUTER 3000 / INNER 1000 / CORRIDOR 1000")
+        print(f"      measured          OUTER {2*oh:.0f} / INNER {2*ih:.0f} / "
+              f"CORRIDOR {oh-ih:.0f}")
+        d = (oh - ih) - 1000.0
+        if abs(d) > 25:
+            print(f"      corridor is {abs(d):.0f} mm "
+                  f"{'WIDER' if d > 0 else 'NARROWER'} than assumed - verify "
+                  f"with a tape measure before changing nav/geom.py, since a "
+                  f"wrong corridor biases every map-based pose.")
+
+    fig, ax = plt.subplots(figsize=(8.6, 8.6), facecolor="#0e1116")
+    ax.set_facecolor("#0b0e13")
+    ax.imshow(np.log1p(grid), origin="lower", cmap="magma",
+              extent=[-GRID_HALF, GRID_HALF, -GRID_HALF, GRID_HALF])
+    ax.set_title(f"{kept} laps stitched on a common centre, "
+                 f"{GRID_MM:.0f} mm pixels", color="#e6e9ee")
+    ax.tick_params(colors="#8b93a1")
+    for sp in ax.spines.values():
+        sp.set_color("#2a2f3a")
+    fig.tight_layout()
+    fig.savefig(out, dpi=130, facecolor="#0e1116")
+    print(f"[build] wrote {out} and {npy}")
+
+
 # --------------------------------------------------------------- storage
 def load_session(path):
     if not os.path.exists(path):
@@ -387,6 +542,8 @@ def main():
     ap.add_argument("--port", default=None)
     ap.add_argument("--tol", type=int, default=None)
     ap.add_argument("--status", action="store_true")
+    ap.add_argument("--build", action="store_true",
+                    help="stitch every lap on a common centre -> mat_grid.png")
     ap.add_argument("--draw", action="store_true",
                     help="draw the recorded laps to mat_map.png")
     ap.add_argument("--fit", action="store_true",
@@ -395,6 +552,9 @@ def main():
 
     if args.status:
         status(args.out)
+        return
+    if args.build:
+        build_map(args.out)
         return
     if args.draw:
         draw_map(args.out)
