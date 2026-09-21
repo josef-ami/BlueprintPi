@@ -1,460 +1,231 @@
 """
-Byte-layout tests for control/percept_link.py.
+The DRIVE and TELEM frames, against docs/PI_STM32_PROTOCOL.md.
 
-The Python side packs with struct; the STM32 side reads with memcpy at literal
-offsets. Those two descriptions of the same frame can drift apart silently and
-the only symptom on the mat is a car that steers at a plausible-looking wrong
-angle. So this file re-implements BOTH C-side halves from the offsets written
-in ObstacleLap.cpp and checks they agree with the codec.
-
-If you change a frame, change it in three places and run this: the .cpp, the
-codec, and here.
+These matter more than they look: nothing here can be checked at runtime, and
+a layout that disagrees with the firmware by one byte produces a car that
+drives somewhere plausible and wrong. The decoders below are written
+independently of link.py, the way the C++ reads the bytes, so a test passing
+means the two sides agree rather than that one file is self-consistent.
 """
 
-import os
 import struct
-import sys
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from control import percept_link as pl
-
-
-def xor8(b):
-    x = 0
-    for v in b:
-        x ^= v
-    return x
-
-
-# --- transcribed from applyPercept() in ObstacleLap.cpp --------------------
-
-def c_apply_percept(f):
-    assert f[0] == 0xAA and f[1] == 0x55
-    assert len(f) == 18
-    assert xor8(f[2:17]) == f[17]
-    flags = f[3]
-    return dict(
-        seq=f[2],
-        lidar_ok=bool(flags & 0x01),
-        cam_ok=bool(flags & 0x02),
-        action=(flags & 0x0C) >> 2,
-        green=bool(flags & 0x10),
-        hello=bool(flags & 0x20),
-        left=struct.unpack_from("<H", f, 4)[0],
-        front=struct.unpack_from("<H", f, 6)[0],
-        right=struct.unpack_from("<H", f, 8)[0],
-        rev=f[10],
-        heading=struct.unpack_from("<h", f, 11)[0] / 10.0,
-        leg=struct.unpack_from("<H", f, 13)[0],
-        cmd=f[15],
-        base_speed=f[16],
-    )
-
-
-# --- transcribed from sendTelemetry() in ObstacleLap.cpp -------------------
-
-def c_send_telemetry(status=0, odo=0, spd=0, head_dd=0, yaw_dd=0, front=0xFFFF,
-                     state=0, corners=0, rem=0, floor=0, seq=0):
-    f = bytearray(22)
-    f[0], f[1], f[2], f[3] = 0x55, 0xAA, seq, status
-    struct.pack_into("<i", f, 4, odo)
-    struct.pack_into("<h", f, 8, spd)
-    struct.pack_into("<h", f, 10, head_dd)
-    struct.pack_into("<h", f, 12, yaw_dd)
-    struct.pack_into("<H", f, 14, front)
-    f[16], f[17] = state, corners
-    struct.pack_into("<H", f, 18, rem)
-    f[20] = floor
-    f[21] = xor8(f[2:21])
-    return bytes(f)
-
-
-# ------------------------------------------------------------------ tests --
-
-def test_percept_length_and_sync():
-    frame = pl.pack_percept(1, 100, 200, 300, 7, True, True, True,
-                            pl.P_AVOID_SHIFT and 1, False, 0.0, 0)
-    assert len(frame) == pl.PERCEPT_LEN == 18
-    assert frame[:2] == pl.PERCEPT_SYNC == b"\xAA\x55"
-
-
-def test_percept_round_trips_through_the_c_parser():
-    frame = pl.pack_percept(seq=42, left_mm=412.0, front_mm=1873.0, right_mm=655.0,
-                            rev=200, lidar_ok=True, cam_ok=True, hello=True,
-                            action=2, green=True,
-                            target_heading_deg=-12.3, leg_mm=587.4)
-    got = c_apply_percept(frame)
-    assert got["seq"] == 42
-    assert (got["left"], got["front"], got["right"]) == (412, 1873, 655)
-    assert got["rev"] == 200
-    assert got["lidar_ok"] and got["cam_ok"] and got["hello"] and got["green"]
-    assert got["action"] == 2
-    assert got["heading"] == -12.3
-    assert got["leg"] == 587
-    assert got["cmd"] == pl.CMD_NONE          # default: no command
-    assert got["base_speed"] == 0             # default: unset -> firmware keeps its own
-
-
-def test_negative_headings_survive_as_int16():
-    for deg in (-179.9, -45.0, -0.1, 0.0, 0.1, 45.0, 179.9):
-        f = pl.pack_percept(0, 0, 0, 0, 0, True, True, False, 0, False, deg, 0)
-        assert c_apply_percept(f)["heading"] == round(deg, 1)
-
-
-def test_missing_ranges_become_the_invalid_code():
-    f = pl.pack_percept(0, None, float("inf"), 99999, 0, False, False, False,
-                        0, False, 0.0, 0)
-    got = c_apply_percept(f)
-    assert got["left"] == got["front"] == got["right"] == 0xFFFF
-    assert not got["lidar_ok"]
-
-
-def test_telemetry_round_trips_from_the_c_packer():
-    frame = c_send_telemetry(
-        status=pl.S_RUNNING | pl.S_DIR_LOCKED | pl.S_IMU_OK,
-        odo=-12345, spd=402, head_dd=-901, yaw_dd=150, front=734,
-        state=pl.ST_AVOID, corners=7, rem=331, floor=2, seq=9)
-    t = pl.parse_telemetry(frame[2:21])
-    assert t.seq_ack == 9
-    assert t.running and t.dir_locked and t.imu_ok
-    assert not t.recovering and not t.lidar_stale
-    assert t.odo_mm == -12345
-    assert t.speed_mmps == 402
-    assert t.heading_deg == -90.1
-    assert t.yaw_rate_dps == 15.0
-    assert t.front_mm == 734
-    assert t.state == pl.ST_AVOID and t.state_name == "AVOID"
-    assert t.corner_count == 7
-    assert t.avoid_remaining_mm == 331
-    assert t.floor_colour == 2
-
-
-def test_invalid_front_decodes_to_inf_never_zero():
-    t = pl.parse_telemetry(c_send_telemetry(front=0xFFFF)[2:21])
-    assert t.front_mm == float("inf")
-
-
-def test_telemetry_payload_is_exactly_nineteen_bytes():
-    assert struct.calcsize("<BBihhhHBBHB") == 19
-    assert 2 + 19 + 1 == pl.TELEM_LEN
-
-
-def test_link_parser_separates_log_lines_from_frames():
-    """The firmware's '#' prints share the port. 0xAA is not ASCII, so a log
-    line can never contain the TELEM sync word."""
-    lines = []
-    link = pl.PerceptLink(on_log=lines.append)
-    frame = c_send_telemetry(state=pl.ST_HEADING, corners=3)
-    stream = b"# HEADING\n" + frame + b"# TURN 4/12\n" + frame
-
-    buf = bytearray(stream)
-    text = bytearray()
-    link._parse(buf, text)          # the same routine run() calls
-    text.extend(buf)
-    link._drain_text(text)
-
-    assert lines == ["# HEADING", "# TURN 4/12"]
-    assert link.telemetry().corner_count == 3
-
-
-# ============================================================================
-# CMD byte, STOPPED and STATUS  (added with the dashboard's obstacle-run tab)
-# ============================================================================
-
-# --- transcribed from serviceLink() + applyPercept() + serviceCommands() ----
-
-class CFirmware:
-    """The byte hunter plus the command logic, one byte at a time."""
-    def __init__(self, state=pl.ST_HEADING):
-        self.buf = bytearray()
-        self.p_cmd = pl.CMD_NONE
-        self.p_cmd_run = 0
-        self.state = state
-        self.percepts = []
-        self.fired = []                     # "STOP" / "REBOOT"
-
-    def feed(self, data):
-        for c in data:
-            if len(self.buf) == 0:
-                if c == 0xAA:
-                    self.buf.append(c)
-                continue
-            if len(self.buf) == 1:
-                if c == 0x55:
-                    self.buf.append(c)
-                else:
-                    self.buf = bytearray([c]) if c == 0xAA else bytearray()
-                continue
-            self.buf.append(c)
-            if len(self.buf) == 18:
-                f = bytes(self.buf)
-                self.buf = bytearray()
-                if xor8(f[2:17]) == f[17]:
-                    self._apply(f)
-
-    def _apply(self, f):
-        self.percepts.append(c_apply_percept(f))
-        self.p_cmd_run = min(255, self.p_cmd_run + 1) if f[15] == self.p_cmd else 1
-        self.p_cmd = f[15]
-        self._service_commands()            # loop() runs it after every read
-
-    def _service_commands(self):
-        if self.p_cmd_run < 3:
-            return
-        if self.p_cmd == 3:
-            self.fired.append("REBOOT")
-        if self.p_cmd == 2 and self.state not in (pl.ST_STOPPED, pl.ST_FINISH):
-            self.fired.append("STOP")
-            self.state = pl.ST_STOPPED
-
-
-def cmd_frames(cmd, n, seq0=0):
-    return b"".join(pl.pack_command_frame(seq0 + i, cmd) for i in range(n))
-
-
-def test_cmd_byte_round_trips_through_the_c_parser():
-    for cmd in (pl.CMD_NONE, pl.CMD_RERUN, pl.CMD_STOP, pl.CMD_REBOOT):
-        f = pl.pack_percept(5, 400, 1500, 600, 9, True, True, True, 1, False,
-                            -3.5, 250, cmd=cmd)
-        assert len(f) == 18
-        got = c_apply_percept(f)
-        assert got["cmd"] == cmd and got["leg"] == 250 and got["action"] == 1
-
-
-def test_base_speed_byte_round_trips_and_is_clamped_to_a_byte():
-    for sp in (0, 40, 70, 150, 255):
-        f = pl.pack_percept(5, 400, 1500, 600, 9, True, True, True, 1, False,
-                            -3.5, 250, cmd=pl.CMD_NONE, base_speed=sp)
-        assert c_apply_percept(f)["base_speed"] == sp
-    # out-of-byte values are clamped, not wrapped
-    assert c_apply_percept(pl.pack_percept(0, 0, 0, 0, 0, True, True, False, 0,
-                                           False, 0.0, 0, base_speed=999))["base_speed"] == 255
-
-
-def test_command_only_frame_carries_no_speed():
-    # A command-only frame must leave the speed at 0 so it never changes it.
-    assert c_apply_percept(pl.pack_command_frame(1, pl.CMD_STOP))["base_speed"] == 0
-
-
-def test_command_only_frame_never_refreshes_the_lidar():
-    got = c_apply_percept(pl.pack_command_frame(1, pl.CMD_STOP))
-    assert got["cmd"] == pl.CMD_STOP
-    assert not got["lidar_ok"] and not got["cam_ok"] and not got["hello"]
-    assert got["left"] == got["front"] == got["right"] == 0xFFFF
-    assert got["action"] == 0
-
-
-def test_stop_needs_three_frames_in_a_row():
-    fw = CFirmware()
-    fw.feed(cmd_frames(pl.CMD_STOP, 2))
-    assert fw.fired == [] and fw.state == pl.ST_HEADING
-    fw.feed(cmd_frames(pl.CMD_STOP, 1, seq0=2))
-    assert fw.fired == ["STOP"] and fw.state == pl.ST_STOPPED
-    fw.feed(cmd_frames(pl.CMD_STOP, 10, seq0=3))       # holding it: fires once
-    assert fw.fired == ["STOP"]
-
-
-def test_interleaved_commands_never_confirm():
-    fw = CFirmware()
-    for i in range(30):
-        fw.feed(pl.pack_command_frame(i, pl.CMD_REBOOT if i % 2 else pl.CMD_STOP))
-    assert fw.fired == []
-
-
-def test_stop_is_ignored_once_finished():
-    fw = CFirmware(state=pl.ST_FINISH)
-    fw.feed(cmd_frames(pl.CMD_STOP, 5))
-    assert fw.fired == [] and fw.state == pl.ST_FINISH
-
-
-def test_reboot_burst_from_send_command_burst_default_confirms():
-    fw = CFirmware()
-    fw.feed(cmd_frames(pl.CMD_REBOOT, 2 * pl.CMD_CONFIRM_FRAMES))
-    assert "REBOOT" in fw.fired
-
-
-def test_a_single_corrupt_frame_cannot_fire_anything():
-    """Fuzz: random single-byte damage to a stream of NONE frames never
-    produces three identical good STOP/REBOOT frames."""
-    import random
-    rnd = random.Random(11)
-    fw = CFirmware()
-    for seq in range(5000):
-        f = bytearray(pl.pack_percept(seq, rnd.uniform(0, 3000), rnd.uniform(0, 3000),
-                                      rnd.uniform(0, 3000), rnd.randrange(256), True,
-                                      True, True, rnd.randrange(3), rnd.random() < .5,
-                                      rnd.uniform(-180, 180), rnd.uniform(0, 1500)))
-        if rnd.random() < 0.2:
-            f[rnd.randrange(2, 18)] ^= 1 << rnd.randrange(8)
-        fw.feed(bytes(f))
-    assert fw.fired == []
-
-
-# --- transcribed from finishStep() / stoppedStep(): the RERUN edge rule ----
-
-class CRerun:
-    def __init__(self):
-        self.armed = False          # cleared on entry to FINISH / STOPPED
-        self.reruns = 0
-
-    def step(self, p_cmd, link_stale=False):
-        if p_cmd != pl.CMD_RERUN:
-            self.armed = True
-            return
-        if not self.armed or link_stale:
-            return
-        self.reruns += 1
-        self.armed = False          # goState(BOOT); re-entering FINISH clears it
-
-
-def test_rerun_held_from_before_the_finish_does_nothing():
-    r = CRerun()
-    for _ in range(50):
-        r.step(pl.CMD_RERUN)
-    assert r.reruns == 0
-
-
-def test_rerun_takes_a_rising_edge_and_gives_exactly_one():
-    r = CRerun()
-    r.step(pl.CMD_NONE)
-    for _ in range(50):
-        r.step(pl.CMD_RERUN)
-    assert r.reruns == 1
-
-
-def test_a_held_stop_arms_the_rerun_in_stopped():
-    r = CRerun()
-    r.step(pl.CMD_STOP)             # the Pi was still holding STOP
-    r.step(pl.CMD_RERUN)
-    assert r.reruns == 1
-
-
-# --- transcribed from sendStatus() in ObstacleLap.cpp ----------------------
-
-def c_send_status(version=1, state=0, flags=0, flags2=0, pflags=0, pcmd=0,
-                  pcmd_run=0, run_no=0, state_ms=0, countdown=0, grace=0,
-                  avoid_ms=0, lane_dd=0, tgt_dd=0, servo_dd=765, pwm=0,
-                  revs_l=0, revs_r=0, rec_tries=0, rec_ret=1, fin=0,
-                  lid_l=0xFFFF, lid_r=0xFFFF, straight=0, corner_lock=0,
-                  avoid_lock=0, segment=0, fin_tgt=1000, front_start=0xFFFF,
-                  phase=0, leg=0, link_age=0xFFFF, lidar_age=0xFFFF, frames=0):
-    f = bytearray(61)
-    f[0], f[1] = 0x55, 0xA5
-    (f[2], f[3], f[4], f[5], f[6], f[7], f[8], f[9]) = (
-        version, state, flags, flags2, pflags, pcmd, pcmd_run, run_no)
-    struct.pack_into("<H", f, 10, state_ms)
-    struct.pack_into("<H", f, 12, countdown)
-    struct.pack_into("<H", f, 14, grace)
-    struct.pack_into("<H", f, 16, avoid_ms)
-    struct.pack_into("<h", f, 18, lane_dd)
-    struct.pack_into("<h", f, 20, tgt_dd)
-    struct.pack_into("<h", f, 22, servo_dd)
-    struct.pack_into("<h", f, 24, pwm)
-    f[26], f[27], f[28], f[29], f[30], f[31] = revs_l, revs_r, rec_tries, rec_ret, fin, 0
-    for off, v in ((32, lid_l), (34, lid_r), (36, straight), (38, corner_lock),
-                   (40, avoid_lock), (42, segment), (44, fin_tgt),
-                   (46, front_start), (48, phase), (50, leg),
-                   (52, link_age), (54, lidar_age)):
-        struct.pack_into("<H", f, off, v)
-    struct.pack_into("<I", f, 56, frames)
-    f[60] = xor8(f[2:60])
-    return bytes(f)
-
-
-def test_status_payload_is_exactly_fifty_eight_bytes():
-    assert struct.calcsize(pl.STATUS_FMT) == 58
-    assert 2 + 58 + 1 == pl.STATUS_LEN == 61
-
-
-def test_status_round_trips_from_the_c_packer():
-    frame = c_send_status(
-        state=pl.ST_AVOID,
-        flags=pl.SF_FSM_STARTED | pl.SF_WALL_SEEN_L | pl.SF_WALL_SEEN_R | pl.SF_BLIND,
-        flags2=pl.SF2_REAL_OPEN_R,
-        pflags=pl.PF_HELLO | pl.PF_LIDAR_OK | pl.PF_GREEN | (2 << pl.PF_ACTION_SHIFT),
-        pcmd=pl.CMD_STOP, pcmd_run=2, run_no=3,
-        state_ms=1234, avoid_ms=873, lane_dd=-900, tgt_dd=-1123,
-        servo_dd=1105, pwm=-90, revs_l=0, revs_r=2, rec_tries=1,
-        rec_ret=pl.ST_AVOID, fin=pl.FINISH_BY_WALL, lid_l=455, lid_r=1880,
-        straight=2345, corner_lock=120, avoid_lock=77, segment=2601,
-        fin_tgt=1400, front_start=1650, phase=301, leg=588, link_age=18,
-        lidar_age=22, frames=70000)
-    s = pl.parse_status(frame[2:60])
-    assert s.version == 1 and s.state == pl.ST_AVOID and s.state_name == "AVOID"
-    assert s.fsm_started and s.wall_seen_l and s.wall_seen_r and s.blind
-    assert not (s.boot_ready or s.lidar_hold or s.link_stale or s.rerun_armed)
-    assert s.real_open_r and not s.real_open_l and not s.lock_needs_real
-    assert s.p_hello and s.p_lidar_ok and s.p_green and not s.p_cam_ok
-    assert s.p_action == 2 and s.p_cmd == pl.CMD_STOP and s.p_cmd_run == 2
-    assert s.run_number == 3
-    assert (s.state_ms, s.avoid_ms) == (1234, 873)
-    assert s.lane_heading_deg == -90.0 and s.target_heading_deg == -112.3
-    assert s.servo_deg == 110.5 and s.motor_pwm == -90
-    assert (s.open_revs_l, s.open_revs_r, s.recover_tries) == (0, 2, 1)
-    assert s.recover_return_state == pl.ST_AVOID
-    assert s.finish_reason == pl.FINISH_BY_WALL
-    assert (s.lidar_l_mm, s.lidar_r_mm) == (455, 1880)
-    assert s.straight_mm == 2345
-    assert (s.corner_lockout_mm, s.avoid_lockout_mm) == (120, 77)
-    assert (s.segment_mm, s.finish_target_mm) == (2601, 1400)
-    assert s.front_at_start_mm == 1650
-    assert (s.phase_mm, s.avoid_leg_mm) == (301, 588)
-    assert (s.link_age_ms, s.lidar_age_ms) == (18, 22)
-    assert s.percept_frames == 70000
-
-
-def test_status_invalid_codes_decode_to_inf_and_none():
-    s = pl.parse_status(c_send_status()[2:60])
-    assert s.lidar_l_mm == s.lidar_r_mm == float("inf")
-    assert s.front_at_start_mm == float("inf")
-    assert s.link_age_ms is None and s.lidar_age_ms is None
-
-
-def test_state_names_cover_the_cpp_enum_including_stopped():
-    assert pl.STATE_NAMES == ["BOOT", "HEADING", "AVOID", "TURN90",
-                              "FINISH", "RECOVER", "STOPPED"]
-    assert pl.ST_STOPPED == 6
-
-
-def test_parser_separates_log_telem_and_status_even_when_split():
-    lines = []
-    link = pl.PerceptLink(on_log=lines.append)
-    stream = (b"# BOOT waiting for Pi\n"
-              + c_send_telemetry(state=pl.ST_BOOT, corners=0)
-              + c_send_status(state=pl.ST_BOOT, countdown=4200,
-                              flags=pl.SF_FSM_STARTED | pl.SF_BOOT_READY)
-              + b"# Pi ready - 5s countdown\n"
-              + c_send_telemetry(state=pl.ST_HEADING, corners=1)
-              + b"# GO  frontAtStart=1650\n")
-    buf, text = bytearray(), bytearray()
-    for i in range(0, len(stream), 7):          # arrive in awkward chunks
-        buf.extend(stream[i:i + 7])
-        link._parse(buf, text)
-        link._drain_text(text)
-    text.extend(buf)
-    link._drain_text(text)
-    assert lines == ["# BOOT waiting for Pi", "# Pi ready - 5s countdown",
-                     "# GO  frontAtStart=1650"]
-    assert link.telemetry().state == pl.ST_HEADING
-    assert link.telemetry().corner_count == 1
-    st = link.status()
-    assert st is not None and st.boot_ready and st.countdown_ms == 4200
-    assert link.rx_frames == 2 and link.rx_status == 1 and link.rx_bad == 0
-
-
-def test_corrupt_status_is_counted_and_skipped():
-    link = pl.PerceptLink(on_log=lambda _l: None)
-    bad = bytearray(c_send_status(state=pl.ST_TURN90))
-    bad[20] ^= 0x01
-    buf = bytearray(bytes(bad) + c_send_telemetry(state=pl.ST_TURN90))
-    link._parse(buf, bytearray())
-    assert link.status() is None
-    assert link.rx_bad == 1
-    assert link.telemetry().state == pl.ST_TURN90
-
-
-def test_no_status_from_older_firmware_leaves_status_none():
-    link = pl.PerceptLink(on_log=lambda _l: None)
-    link._parse(bytearray(c_send_telemetry(state=pl.ST_HEADING)), bytearray())
-    assert link.status() is None
+
+import pytest
+
+from control.intent import ActionIntent, SteerMode
+from control.link import (DRIVE_LEN, DRIVE_PAYLOAD, F_CAM_OK, F_ENABLE,
+                          F_LIDAR_OK, F_MODE_MASK, F_MODE_SHIFT,
+                          F_PILLAR_SEEN, F_REVERSE, RANGE_NONE, S_ARC_DONE,
+                          S_RECOVERING, TELEM_LEN, TELEM_PAYLOAD, Telemetry,
+                          pack_drive, unpack_telem, xor8)
+
+
+# --------------------------------------------------- an independent reader
+
+def read_drive(frame):
+    """Decode a DRIVE frame the way ObstacleRound.cpp's acceptDrive() does:
+    by offset, not by struct format."""
+    assert len(frame) == DRIVE_LEN
+    assert frame[0] == 0xAA and frame[1] == 0x55, "sync"
+    p = frame[2:2 + DRIVE_PAYLOAD]
+    assert xor8(p) == frame[-1], "checksum"
+    return {
+        "seq": p[0],
+        "flags": p[1],
+        "mode": (p[1] & F_MODE_MASK) >> F_MODE_SHIFT,
+        "heading": struct.unpack_from("<h", p, 2)[0],
+        "steer": struct.unpack_from("<h", p, 4)[0],
+        "speed": p[6],
+        "arc_lock": p[7],
+        "left": struct.unpack_from("<H", p, 8)[0],
+        "front": struct.unpack_from("<H", p, 10)[0],
+        "right": struct.unpack_from("<H", p, 12)[0],
+        "rev": p[14],
+        "cmd": p[15],
+    }
+
+
+def make_telem(seq=0, status=0, heading=0.0, yaw=0.0, odo=0, servo=0.0,
+               floor=0, tries=0, boot=0):
+    """Build a TELEM frame the way the firmware's sendTelem() does."""
+    p = bytearray(TELEM_PAYLOAD)
+    p[0] = seq & 0xFF
+    p[1] = status
+    struct.pack_into("<h", p, 2, int(round(heading * 10)))
+    struct.pack_into("<h", p, 4, int(round(yaw * 10)))
+    struct.pack_into("<i", p, 6, odo)
+    struct.pack_into("<h", p, 10, int(round(servo * 10)))
+    p[12] = floor
+    p[13] = tries
+    struct.pack_into("<I", p, 14, boot)
+    return bytes(p)
+
+
+# ----------------------------------------------------------------- sizes
+
+def test_frame_sizes_match_the_spec():
+    assert DRIVE_LEN == 19 and DRIVE_PAYLOAD == 16
+    assert TELEM_LEN == 21 and TELEM_PAYLOAD == 18
+    assert DRIVE_LEN == 2 + DRIVE_PAYLOAD + 1
+    assert TELEM_LEN == 2 + TELEM_PAYLOAD + 1
+
+
+def test_sync_words_are_reversed_and_non_ascii():
+    """A frame must never be mistakable for one going the other way, and a
+    log line must never be mistakable for a frame."""
+    f = pack_drive(0, ActionIntent.stop(), None, None, None, 0,
+                   False, False, False)
+    assert f[:2] == b"\xAA\x55"
+    t = b"\x55\xAA"
+    assert f[:2] == bytes(reversed(t))
+    assert 0xAA > 0x7F, "0xAA cannot appear in ASCII text"
+
+
+# ----------------------------------------------------------------- DRIVE
+
+def test_drive_round_trip():
+    intent = ActionIntent(mode=SteerMode.HEADING_HOLD,
+                          target_heading_deg=-12.3, steer_deg=4.5,
+                          speed_pwm=60, arc_lock=0.7)
+    f = pack_drive(7, intent, 412, 1873, 655, 200,
+                   lidar_ok=True, cam_ok=True, pillar_seen=False)
+    d = read_drive(f)
+    assert d["seq"] == 7
+    assert d["mode"] == SteerMode.HEADING_HOLD
+    assert d["heading"] == -123
+    assert d["steer"] == 45
+    assert d["speed"] == 60
+    assert d["arc_lock"] == 70
+    assert (d["left"], d["front"], d["right"]) == (412, 1873, 655)
+    assert d["rev"] == 200
+
+
+def test_drive_flags():
+    i = ActionIntent(mode=SteerMode.ARC, speed_pwm=60)
+    d = read_drive(pack_drive(0, i, None, None, None, 0,
+                              lidar_ok=True, cam_ok=True, pillar_seen=True))
+    assert d["flags"] & F_ENABLE
+    assert d["flags"] & F_LIDAR_OK
+    assert d["flags"] & F_CAM_OK
+    assert d["flags"] & F_PILLAR_SEEN
+    assert d["mode"] == SteerMode.ARC
+
+
+def test_enable_is_clear_when_stopped():
+    """ENABLE must never be set by a STOP, whatever the speed field says."""
+    d = read_drive(pack_drive(0, ActionIntent(mode=SteerMode.STOP,
+                                              speed_pwm=200),
+                              None, None, None, 0, True, True, False))
+    assert not (d["flags"] & F_ENABLE)
+
+
+def test_enable_is_clear_at_zero_speed():
+    d = read_drive(pack_drive(0, ActionIntent(mode=SteerMode.HEADING_HOLD,
+                                              speed_pwm=0),
+                              None, None, None, 0, True, True, False))
+    assert not (d["flags"] & F_ENABLE)
+
+
+def test_reverse_flag():
+    i = ActionIntent(mode=SteerMode.DIRECT, speed_pwm=60, reverse=True)
+    d = read_drive(pack_drive(0, i, None, None, None, 0, False, False, False))
+    assert d["flags"] & F_REVERSE
+
+
+def test_missing_ranges_are_the_sentinel_not_zero():
+    """A beam with no return must read FAR, never near - a zero here would
+    look like a wall touching the car and fire the panic reflex."""
+    d = read_drive(pack_drive(0, ActionIntent.stop(), None, None, None, 0,
+                              False, False, False))
+    assert d["left"] == d["front"] == d["right"] == RANGE_NONE
+
+
+def test_out_of_range_distance_becomes_the_sentinel():
+    d = read_drive(pack_drive(0, ActionIntent.stop(), 70000, -5, float("inf"),
+                              0, False, False, False))
+    assert d["left"] == d["front"] == d["right"] == RANGE_NONE
+
+
+def test_seq_and_rev_wrap_without_overflowing():
+    d = read_drive(pack_drive(300, ActionIntent.stop(), None, None, None, 777,
+                              False, False, False))
+    assert d["seq"] == 300 & 0xFF
+    assert d["rev"] == 777 & 0xFF
+
+
+def test_heading_is_wrapped_by_the_mapper_not_the_packer():
+    """pack_drive clamps rather than wraps, so a caller that skips the mapper
+    gets a saturated value instead of a silently wrong one."""
+    i = ActionIntent(mode=SteerMode.HEADING_HOLD, target_heading_deg=5000.0,
+                     speed_pwm=60)
+    d = read_drive(pack_drive(0, i, None, None, None, 0, False, False, False))
+    assert d["heading"] == 32767
+
+
+def test_checksum_covers_every_payload_byte():
+    f = bytearray(pack_drive(1, ActionIntent(mode=SteerMode.HEADING_HOLD,
+                                             speed_pwm=60),
+                             100, 200, 300, 5, True, True, True))
+    for i in range(2, 2 + DRIVE_PAYLOAD):
+        bad = bytearray(f)
+        bad[i] ^= 0x01
+        assert xor8(bytes(bad[2:2 + DRIVE_PAYLOAD])) != bad[-1], \
+            f"a flipped bit at offset {i} must break the checksum"
+
+
+# ----------------------------------------------------------------- TELEM
+
+def test_telem_round_trip():
+    t = unpack_telem(make_telem(seq=9, status=S_ARC_DONE, heading=-45.6,
+                                yaw=120.0, odo=-98765, servo=76.5, floor=1,
+                                tries=2, boot=0xDEADBEEF))
+    assert t.seq == 9
+    assert t.heading_deg == pytest.approx(-45.6)
+    assert t.yaw_rate_dps == pytest.approx(120.0)
+    assert t.odo_ticks == -98765
+    assert t.servo_deg == pytest.approx(76.5)
+    assert t.floor == 1 and t.floor_name == "orange"
+    assert t.recover_tries == 2
+    assert t.boot_id == 0xDEADBEEF
+    assert t.arc_done and not t.recovering
+
+
+def test_telem_odometry_is_signed():
+    """The encoder free-runs and can go negative when the car reverses."""
+    t = unpack_telem(make_telem(odo=-2_000_000_000))
+    assert t.odo_ticks == -2_000_000_000
+
+
+def test_telem_status_bits():
+    t = unpack_telem(make_telem(status=S_RECOVERING))
+    assert t.recovering and not t.arc_done
+    assert not t.enabled
+
+
+def test_telem_freshness():
+    t = Telemetry(stamp=100.0)
+    assert t.fresh(now=100.1, stale_s=0.3)
+    assert not t.fresh(now=100.5, stale_s=0.3)
+
+
+def test_default_telemetry_is_stale():
+    """A Telemetry nobody has filled in must not look like a live STM32."""
+    assert not Telemetry().fresh(now=1000.0)
+
+
+# ----------------------------------------------------------- mode values
+
+def test_mode_values_are_the_wire_values():
+    """The firmware switches on these integers directly."""
+    assert int(SteerMode.STOP) == 0
+    assert int(SteerMode.HEADING_HOLD) == 1
+    assert int(SteerMode.DIRECT) == 2
+    assert int(SteerMode.ARC) == 3
+
+
+def test_every_mode_survives_the_flags_byte():
+    for m in SteerMode:
+        i = ActionIntent(mode=m, speed_pwm=60)
+        d = read_drive(pack_drive(0, i, None, None, None, 0,
+                                  False, False, False))
+        assert d["mode"] == int(m)
