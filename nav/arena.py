@@ -113,7 +113,50 @@ def build_seats() -> list[Seat]:
     return seats
 
 
-SEATS: list[Seat] = build_seats()
+def load_measured_seats(path=None):
+    """Seats CAPTURED from the mat, if they have been.
+
+    perception/seat_dash.py writes arena_seats.json: one corridor captured by
+    eye and LiDAR, replicated through 90 degrees into the other three. Those
+    are real positions. The parametric grid below is a guess that has already
+    discarded a correct detection for landing 198 mm from an imaginary seat, so
+    measured seats win whenever they exist.
+    """
+    import json
+    import os
+    p = path or os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "arena_seats.json")
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            raw = json.load(f).get("seats", [])
+    except Exception:                                   # noqa: BLE001
+        return None
+    if not raw:
+        return None
+    seats = []
+    for i, s in enumerate(raw):
+        x, y = float(s["x"]), float(s["y"])
+        side, along, lat = _describe(x, y)
+        seats.append(Seat(f"M{i}", x, y, side, along, lat))
+    return seats
+
+
+def _describe(x, y):
+    """Which straight a measured point belongs to, and its (along, lat)."""
+    cc = CORRIDOR_CENTER
+    d = {"N": abs(y - cc), "S": abs(y + cc), "E": abs(x - cc), "W": abs(x + cc)}
+    side = min(d, key=lambda k: d[k])
+    if side == "N":
+        return side, x, y - cc
+    if side == "S":
+        return side, x, -cc - y
+    if side == "E":
+        return side, y, x - cc
+    return side, y, -cc - x
+
+
+SEATS: list[Seat] = load_measured_seats() or build_seats()
+SEATS_ARE_MEASURED = load_measured_seats() is not None
 _SEAT_XY = np.array([[s.x, s.y] for s in SEATS], dtype=np.float64)
 
 # seats grouped by the line they sit on; at most one of each group is legal
