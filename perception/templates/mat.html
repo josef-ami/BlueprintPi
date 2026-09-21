@@ -57,6 +57,7 @@
         <div>heading</div><div class="v" id="pth">–</div>
         <div>match score</div><div class="v" id="score">–</div>
         <div>scan points</div><div class="v" id="npts">–</div>
+        <div>measured obstacles</div><div class="v" id="nobs">–</div>
       </div>
     </div>
     <div class="card">
@@ -108,6 +109,7 @@
         <span><span class="sw" style="background:var(--green)"></span>green sign</span>
         <span><span class="sw" style="background:var(--empty);border:1px solid #3a4150"></span>empty seat</span>
         <span><span class="sw" style="background:var(--park)"></span>parking</span>
+        <span><span class="sw" style="background:#ff9f1c"></span>measured obstacle</span>
       </div>
     </div>
     <div class="card">
@@ -155,6 +157,16 @@ function draw(d){
   // scan
   if(d.scan){ctx.fillStyle=getCss('--scan');
     for(const p of d.scan){const [x,y]=T(p[0],p[1]); ctx.fillRect(x-1.2,y-1.2,2.4,2.4);}}
+  // MEASURED obstacles: drawn where the LiDAR actually says they are, with no
+  // snapping to the seat grid. If one of these sits away from every seat
+  // square, the seat grid is wrong - not the measurement.
+  for(const o of d.obstacles||[]){
+    const [ox,oy]=T(o.x,o.y);
+    ctx.strokeStyle='#ff9f1c'; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.arc(ox,oy,6,0,7); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(ox-9,oy); ctx.lineTo(ox+9,oy);
+    ctx.moveTo(ox,oy-9); ctx.lineTo(ox,oy+9); ctx.stroke();
+  }
   // ground-truth ghost (sim only) - shows how close the LiDAR-only estimate is
   if(d.truth){const [tx,ty]=T(d.truth.x,d.truth.y);
     ctx.strokeStyle='rgba(230,233,238,.35)'; ctx.lineWidth=1.5;
@@ -168,6 +180,7 @@ function draw(d){
   set('px',d.pose?d.pose.x:'–'); set('py',d.pose?d.pose.y:'–');
   set('pth',d.pose?d.pose.th_deg+'°':'–'); set('score',d.score);
   set('npts',d.scan?d.scan.length:'–');
+  set('nobs',(d.obstacles||[]).length);
   const N=d.nav;
   if(N){set('nstate',N.state); set('ndir',N.direction); set('nsec',N.section);
     set('nlap',N.corners+' / '+N.laps);

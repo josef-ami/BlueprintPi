@@ -29,6 +29,7 @@ from nav.localize import DistanceField, ScanMatcher, PoseFilter
 from nav.pillarmap import PillarMap, extract, RED, GREEN, UNKNOWN
 from nav import arena, parking as parking_mod
 from perception.tower import find_towers, tower_points
+from perception import selfmask
 
 _COLOR_NAME = {RED: "red", GREEN: "green", UNKNOWN: "unknown"}
 
@@ -95,6 +96,7 @@ class WorldBelief:
         self.unclassified = []         # non-seat detections (parking/noise)
         self.last_fit = None           # perception.fit.FitResult from fit_start
         self.towers = []               # free-standing valleys, mat frame
+        self.obstacles = []            # MEASURED obstacles (x,y,size), seat-free
         self.park_tracker = parking_mod.ParkingTracker()
         self._t0 = time.time()
 
@@ -149,6 +151,12 @@ class WorldBelief:
         return self.filter.healthy
 
     # ---- localization ----
+    def _clean(self, ranges):
+        """Drop the bearings where the car sees its own body. Every consumer -
+        matcher, extractor, tower test - must use this, or the robot's own
+        structure is scored as arena."""
+        return selfmask.apply(ranges)
+
     def fit_start(self, ranges, cw=None, car_len_mm=175.0,
                   sides=("N", "E", "S", "W")):
         """Systematic start-up fit: score every allowed pose on walls + seats +
@@ -158,6 +166,7 @@ class WorldBelief:
 
         Returns the fit.FitResult (or None if the scan was unusable).
         """
+        ranges = self._clean(ranges)
         if valid_count(ranges) < MIN_VALID:
             return None
         res = _fit(ranges, self.field, self.matcher, cw=cw,
@@ -190,6 +199,7 @@ class WorldBelief:
         corridor, so sweep seeds down the heading direction (+/-700 mm) and let
         each tight match recover lateral + heading. This tolerates a large
         along-track error in the guess, which a single window cannot."""
+        ranges = self._clean(ranges)
         if valid_count(ranges) < MIN_VALID:
             return self.pose, 0.0
         gx, gy, gth = guess if guess is not None else self.pose
@@ -216,6 +226,7 @@ class WorldBelief:
         lock is only nudged by noise, not dragged across the corridor. The wide
         window is only for the first fix (global_init / auto_init).
         """
+        ranges = self._clean(ranges)
         if valid_count(ranges) < MIN_VALID:
             return self.pose, self.score       # skip spin-up/dropout frames
         x0, y0, th0 = self.pose
@@ -255,7 +266,7 @@ class WorldBelief:
         cam_dets: [(colour_int, bearing_deg)] in the camera frame, + = left.
         """
         t_s = time.time() - self._t0 if t_s is None else t_s
-        r = np.asarray(ranges, dtype=np.float64)
+        r = np.asarray(self._clean(ranges), dtype=np.float64)
 
         # 1) free pillar detections -> confirmation map (existing machinery).
         # In this map-based design a legal sign only ever stands on a SEAT, so
@@ -285,16 +296,32 @@ class WorldBelief:
         # which is exactly when map-subtraction invents pillars out of wall
         # residue. It is also what keeps the parking blocks out: flush to the
         # wall, their valley is too shallow to qualify.
-        tpts = tower_points(list(r), self.pose, find_towers(list(r)))
+        towers = find_towers(list(r))
+        tpts = tower_points(list(r), self.pose, towers)
         self.towers = tpts
+
+        # MEASURED POSITION IS THE TRUTH, not a seat index.
+        #
+        # The seat grid in arena.py is parametric and has never been checked
+        # against the official field drawing, and it shows: a real sign
+        # measured at (417, 970) - size 60 mm, valley depth 924 mm, a textbook
+        # detection - fell 198 mm from the nearest invented seat and was
+        # DISCARDED by a 160 mm snap gate. LazyGo, who placed 3rd
+        # internationally, carry ang/dst/x/y and no seat index at all.
+        #
+        # So a free-standing valley is an obstacle, full stop. Snapping to a
+        # seat is an optional label applied afterwards, never a gate.
+        self.obstacles = [{"x": round(x, 1), "y": round(y, 1),
+                           "size_mm": round(t.size_mm, 1),
+                           "range_mm": round(t.range_mm, 1),
+                           "bearing_deg": round(t.bearing_deg, 1)}
+                          for t, (x, y) in zip(towers, tpts)]
 
         def _free_standing(d):
             return any(math.hypot(d[0] - tx, d[1] - ty) < TOWER_MATCH_MM
                        for (tx, ty) in tpts)
 
-        dets = [d for d in rest
-                if arena.nearest_seat(d[0], d[1])[0] is not None
-                and _free_standing(d)]
+        dets = [d for d in rest if _free_standing(d)]
         self.unclassified = [d for d in rest
                              if arena.nearest_seat(d[0], d[1])[0] is None]
         self.pillars.update(dets, t_s, pose_healthy=pose_healthy)
@@ -383,6 +410,7 @@ class WorldBelief:
                         for p in self.pillars.confirmed()],
             "arena": {"outer": arena.OUTER, "inner": arena.INNER,
                       "corridor": arena.CORRIDOR},
+            "obstacles": list(self.obstacles),
         }
         if self.parking is not None:
             snap["parking"] = {"side": self.parking.side,
