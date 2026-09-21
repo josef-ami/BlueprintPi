@@ -98,20 +98,30 @@ def _live_source():
 def run(source, guess, frames=12, cw=True):
     gen, truth, sc = source
     wb = WorldBelief()
-    first = True
-    init_side = None
-    for i in range(frames):
+    inited = False
+    last_ranges = None
+    tries = 0
+    # keep pulling scans until a real fix lands (early revs can be empty), then
+    # run `frames` more to let the semantic belief settle
+    while not inited and tries < 40:
         ranges, cam = next(gen)
-        if first:
-            if guess is not None:
-                wb.global_init(ranges, guess=guess)
-            else:
-                init_side, isc, seen = wb.auto_init(ranges, cw=cw)
-                print(f"auto-init: start straight = {init_side}  score {isc:.2f}  "
-                      f"parking {'CONFIRMED' if seen else 'not seen (fell back)'}")
-            first = False
+        tries += 1
+        if guess is not None:
+            _p, isc = wb.global_init(ranges, guess=guess)
+            inited = isc > 0.0
         else:
-            wb.track(ranges)                # LiDAR-only (no IMU/encoder)
+            init_side, isc, seen = wb.auto_init(ranges, cw=cw)
+            inited = init_side is not None and isc > 0.0
+            if inited:
+                print(f"auto-init: start straight = {init_side}  score {isc:.2f}  "
+                      f"parking {'CONFIRMED' if seen else 'not seen (fell back)'} "
+                      f"(±180° from a static scan)")
+        if inited:
+            wb.update(ranges, cam_dets=cam)
+            last_ranges = ranges
+    for _ in range(frames):
+        ranges, cam = next(gen)
+        wb.track(ranges)                    # LiDAR-only (no IMU/encoder)
         wb.update(ranges, cam_dets=cam)
         last_ranges = ranges
     return wb, last_ranges, truth, sc

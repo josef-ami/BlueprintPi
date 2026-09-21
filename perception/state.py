@@ -31,6 +31,13 @@ from nav import arena, parking as parking_mod
 
 _COLOR_NAME = {RED: "red", GREEN: "green", UNKNOWN: "unknown"}
 
+MIN_VALID = 30       # a scan with fewer usable returns is a spin-up/dropout frame
+
+
+def valid_count(ranges):
+    r = np.asarray(ranges, dtype=np.float64)
+    return int((np.isfinite(r) & (r > 80) & (r < 2600)).sum())
+
 SEAT_RADIUS_MM = 60.0        # how close a return must be to the seat centre
 CLEAR_MARGIN_MM = 70.0       # seen this far past a seat -> nothing there
 OCC_MAX_RANGE_MM = 2600.0
@@ -81,6 +88,12 @@ class WorldBelief:
         self.sensor_ahead = sensor_ahead
         self.pillars = PillarMap()
         self.seats = {s.id: SeatBelief(s) for s in arena.SEATS}
+        # wide matcher for the first fix / static drop: the car may be anywhere
+        # along a 1 m straight, so a +/-150 mm window (fine for tracking) can't
+        # reach it. +/-700 mm covers a whole straight section.
+        self.wide = ScanMatcher(self.field, win_xy=700.0, win_th=15.0,
+                                coarse_xy=40.0, coarse_th=3.0,
+                                fine_xy=10.0, fine_th=0.5)
         self.filter = PoseFilter(0.0, 0.0, 0.0, self.matcher,
                                  sensor_ahead=sensor_ahead)
         self.score = 0.0
@@ -102,11 +115,17 @@ class WorldBelief:
         whose scan actually yields two magenta blocks hugging the outer wall.
         Score breaks any remaining tie. Returns (side, score, parking_seen).
         """
+        if valid_count(ranges) < MIN_VALID:
+            return None, 0.0, False
         r = list(ranges)
         cands = []
         for side in sides:
-            p0 = canonical_start(side, cw)
-            sc, x, y, th = self.matcher.match(r, *p0, self.sensor_ahead)
+            bx, by, bth = canonical_start(side, cw)
+            ax, ay = math.cos(bth), math.sin(bth)
+            # sweep along the corridor, try both driving senses (front/back)
+            seeds = [(bx + d * ax, by + d * ay, bth + dh)
+                     for d in range(-700, 701, 100) for dh in (0.0, math.pi)]
+            sc, x, y, th = self._grid_match(r, seeds)
             dets = extract(r, (x, y, th), self.field)
             unc = [d for d in dets if arena.nearest_seat(d[0], d[1])[0] is None]
             bay = parking_mod.detect(unc)
@@ -133,13 +152,30 @@ class WorldBelief:
         return self.filter.healthy
 
     # ---- localization ----
+    def _grid_match(self, ranges, seeds):
+        """Tight correlative match from every seed; return the best (sc,x,y,th).
+        A dense grid of tight matches is far more reliable on a partial/occluded
+        real scan than one match with a huge window (which lands in local maxima).
+        """
+        r = list(ranges)
+        best = (-1.0, 0.0, 0.0, 0.0)
+        for (x, y, th) in seeds:
+            sc, X, Y, T = self.matcher.match(r, x, y, th, self.sensor_ahead)
+            if sc > best[0]:
+                best = (sc, X, Y, T)
+        return best
+
     def global_init(self, ranges, guess=None):
-        """Ungated correlative match from `guess` - use for the first fix / a
-        static drop where the guess may be off by more than the tracking gate
-        would allow."""
+        """First fix from a rough `guess`. The unobservable axis is ALONG the
+        corridor, so sweep seeds down the heading direction (+/-700 mm) and let
+        each tight match recover lateral + heading. This tolerates a large
+        along-track error in the guess, which a single window cannot."""
+        if valid_count(ranges) < MIN_VALID:
+            return self.pose, 0.0
         gx, gy, gth = guess if guess is not None else self.pose
-        sc, x, y, th = self.matcher.match(list(ranges), gx, gy, gth,
-                                          self.sensor_ahead)
+        seeds = [(gx + d * math.cos(gth), gy + d * math.sin(gth), gth)
+                 for d in range(-700, 701, 100)]
+        sc, x, y, th = self._grid_match(ranges, seeds)
         self.score = sc
         if sc > 0.0:
             self.filter.x, self.filter.y, self.filter.th = x, y, th
@@ -155,8 +191,20 @@ class WorldBelief:
         near a corner or when a mapped pillar is in view, so mid-straight it is
         rough and can lag. That roughness is expected - the encoder + IMU are
         meant to sharpen it later (see predict()), not to be needed for it.
+
+        Uses the TIGHT matcher window around the current pose so a good static
+        lock is only nudged by noise, not dragged across the corridor. The wide
+        window is only for the first fix (global_init / auto_init).
         """
-        return self.global_init(ranges, guess=self.pose)
+        if valid_count(ranges) < MIN_VALID:
+            return self.pose, self.score       # skip spin-up/dropout frames
+        x0, y0, th0 = self.pose
+        sc, x, y, th = self.matcher.match(list(ranges), x0, y0, th0,
+                                          self.sensor_ahead)
+        self.score = sc
+        if sc > 0.0:
+            self.filter.x, self.filter.y, self.filter.th = x, y, th
+        return self.pose, sc
 
     # ---- optional LATER sharpening from IMU + encoder (not used by default) --
     def predict(self, d_mm, dth_rad):

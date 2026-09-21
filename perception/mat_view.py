@@ -144,13 +144,17 @@ class LiveSource(threading.Thread):
             ranges = lidar.ranges
             if first:
                 if self.guess is not None:
-                    self.wb.global_init(ranges, guess=self.guess)
+                    _p, sc = self.wb.global_init(ranges, guess=self.guess)
+                    first = sc <= 0.0            # retry until a real fix lands
                 else:
                     side, sc, seen = self.wb.auto_init(ranges, cw=self.cw)
-                    print(f"auto-init: start straight = {side}  score {sc:.2f}  "
-                          f"parking {'CONFIRMED' if seen else 'not seen'} "
-                          f"(corridor is fixed up to a 180 deg flip from a static "
-                          f"scan; drive forward or pass --guess to pin it)")
+                    first = side is None or sc <= 0.0
+                    if not first:
+                        print(f"auto-init: start straight = {side}  score {sc:.2f}  "
+                              f"parking {'CONFIRMED' if seen else 'not seen'} "
+                              f"(±180° flip from a static scan; drive or --guess to pin)")
+                if first:
+                    continue                    # empty/spin-up scan, wait
             else:
                 self.wb.track(ranges)       # LiDAR-only pose (no IMU/encoder)
             self.wb.update(ranges)          # camera wiring is a later step
