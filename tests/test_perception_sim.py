@@ -28,14 +28,22 @@ def test_synth_scan_shape_and_returns():
 
 
 def test_scan_distance_matches_geometry_forward():
-    # facing +x in the south corridor centre; nearest wall ahead is the outer
-    # corner far away, but the ray straight up (index 90) hits the inner wall.
+    """Sitting mid-corridor, both side rays must read half the corridor.
+
+    Derived from geom, never hard-coded: the arena dimensions come from
+    arena_cal.json once the mat has been measured, so a literal 500 here would
+    assert the rulebook rather than the mat. This one measured
+    2990/1090/950, making the half-corridor 475 mm.
+    """
+    from nav import arena, geom
     sc = sim.Scenario(pillars={}, parking_side="N")
     segs = sim.scenario_segments(sc)
-    r, q = sim.synth_scan((0.0, -1000.0, 0.0), segs,
+    cc = arena.CORRIDOR_CENTER
+    r, q = sim.synth_scan((0.0, -cc, 0.0), segs,
                           rng=np.random.default_rng(0),
                           range_sigma=0.0, dropout_p=0.0)
-    # ray at +90 deg (north) from y=-1000 hits inner wall at y=-500 -> 500 mm
-    assert r[90] == pytest.approx(500.0, abs=5.0)
-    # ray at -90 (index 270, south) hits outer wall at y=-1500 -> 500 mm
-    assert r[270] == pytest.approx(500.0, abs=5.0)
+    to_inner = cc - geom.INNER / 2.0
+    to_outer = geom.OUTER / 2.0 - cc
+    assert to_inner == pytest.approx(geom.CORRIDOR / 2.0, abs=1.0)
+    assert r[90] == pytest.approx(to_inner, abs=5.0)     # +90 deg = inner wall
+    assert r[270] == pytest.approx(to_outer, abs=5.0)    # -90 deg = outer wall

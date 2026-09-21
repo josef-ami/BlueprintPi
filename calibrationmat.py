@@ -454,6 +454,22 @@ def build_map(path, out="mat_grid.png", npy="mat_grid.npy"):
         print(f"\n      geom.py assumes   OUTER 3000 / INNER 1000 / CORRIDOR 1000")
         print(f"      measured          OUTER {2*oh:.0f} / INNER {2*ih:.0f} / "
               f"CORRIDOR {oh-ih:.0f}")
+        # write it where nav/geom.py will pick it up
+        import json as _json
+        cal = {"outer_mm": round(2 * oh, 1), "inner_mm": round(2 * ih, 1),
+               "corridor_mm": round(oh - ih, 1), "laps": kept,
+               "source": "calibrationmat.py --build"}
+        # the arena's own identity: inner = outer - 2*corridor. If the three
+        # measurements do not satisfy it they are not one consistent arena.
+        resid = cal["outer_mm"] - 2 * cal["corridor_mm"] - cal["inner_mm"]
+        cal["identity_residual_mm"] = round(resid, 1)
+        with open("arena_cal.json", "w", encoding="utf-8") as f:
+            _json.dump(cal, f, indent=2)
+        print(f"      identity check   : outer - 2*corridor - inner = "
+              f"{resid:+.1f} mm "
+              f"({'consistent' if abs(resid) < 20 else 'INCONSISTENT'})")
+        print(f"      wrote arena_cal.json - nav/geom.py now uses these")
+
         d = (oh - ih) - 1000.0
         if abs(d) > 25:
             print(f"      corridor is {abs(d):.0f} mm "
@@ -473,6 +489,131 @@ def build_map(path, out="mat_grid.png", npy="mat_grid.npy"):
     fig.tight_layout()
     fig.savefig(out, dpi=130, facecolor="#0e1116")
     print(f"[build] wrote {out} and {npy}")
+
+
+# ------------------------------------------ STEP 3: capture real seats
+SEATS_FILE = "arena_seats.json"
+
+
+def capture_seats(at=None, start=None, out=SEATS_FILE, samples=6):
+    """Record where signs ACTUALLY stand, one at a time.
+
+    The seat grid in nav/arena.py was invented by me and has already discarded
+    a correct 60 mm detection for sitting 198 mm from the nearest imaginary
+    seat. This replaces it with measurement: put one sign on a legal position,
+    let the tower test find it, and write down where it really is.
+
+    The car stays still throughout, so it is localized ONCE. You supply a rough
+    pose only to settle which of the four symmetric corridors the car is in -
+    the arena cannot tell you that, and nothing else needs your input.
+    """
+    import json
+    from worldstate import SharedState
+    from sensors.lidar import LidarThread
+    from perception.state import WorldBelief
+    from perception.tower import find_towers, tower_points
+    from perception.nav import LIDAR_AHEAD_MM
+    from nav import arena
+
+    shared = SharedState()
+    lz = LidarThread(shared)
+    lz.start()
+
+    wb = WorldBelief(sensor_ahead=LIDAR_AHEAD_MM)
+
+    def fresh(n=1, timeout=8.0):
+        """n distinct revolutions, cleaned."""
+        got, last, t0 = [], -1, time.time()
+        while len(got) < n and time.time() - t0 < timeout:
+            _c, li = shared.snapshot()
+            if li is not None and li.rev != last:
+                last = li.rev
+                sc = np.asarray(li.ranges, dtype=np.float64)
+                if np.isfinite(sc).sum() >= MIN_RETURNS:
+                    got.append(clean_scan(sc)[0])
+            time.sleep(0.02)
+        return got
+
+    print("[seats] locating the car (keep the mat clear of signs for this) ...")
+    scans = fresh(3)
+    if not scans:
+        print("[seats] no scans - is the RPLidar connected?")
+        lz.stop()
+        return
+    sides = (start,) if start else ("N", "E", "S", "W")
+    res = wb.fit_start(scans[-1], sides=sides) if at is None else None
+    if at is not None:
+        wb.global_init(scans[-1], guess=at)
+    if res is not None:
+        print(res.explain())
+    x, y, th = wb.pose
+    print(f"[seats] car at ({x:.0f}, {y:.0f}, {math.degrees(th):.1f} deg), "
+          f"match {wb.score:.2f}")
+    if wb.score < 0.5:
+        print("[seats] WARNING low match - every seat recorded from here "
+              "inherits this pose error. Reposition and retry.")
+
+    records = []
+    if os.path.exists(out):
+        with open(out, "r", encoding="utf-8") as f:
+            records = json.load(f).get("seats", [])
+        print(f"[seats] {len(records)} already recorded in {out}")
+
+    print("\nPlace ONE sign on a legal position, then press Enter to record it.")
+    print("  Enter        record the sign currently in view")
+    print("  r            re-locate the car (only if you moved it)")
+    print("  u            undo the last record")
+    print("  q            finish and save\n")
+    try:
+        while True:
+            cmd = input(f"[{len(records)} recorded] > ").strip().lower()
+            if cmd == "q":
+                break
+            if cmd == "u":
+                if records:
+                    g = records.pop()
+                    print(f"   removed ({g['x']:.0f}, {g['y']:.0f})")
+                continue
+            if cmd == "r":
+                sc = fresh(3)
+                if sc:
+                    wb.fit_start(sc[-1], sides=sides)
+                    x, y, th = wb.pose
+                    print(f"   car at ({x:.0f}, {y:.0f}, "
+                          f"{math.degrees(th):.1f}) match {wb.score:.2f}")
+                continue
+
+            # average several revolutions so one noisy scan cannot place a seat
+            pts = []
+            for sc in fresh(samples):
+                ts = find_towers(sc)
+                if len(ts) != 1:
+                    continue
+                pts.extend(tower_points(sc, wb.sensor_pose, ts))
+            if not pts:
+                print("   no single sign in view - the tower test found "
+                      "none or several. Check placement and try again.")
+                continue
+            P = np.array(pts)
+            mx, my = float(P[:, 0].mean()), float(P[:, 1].mean())
+            spread = float(np.hypot(P[:, 0].std(), P[:, 1].std()))
+            near, d = arena.nearest_seat(mx, my, tol=1e9)
+            records.append({"x": round(mx, 1), "y": round(my, 1),
+                            "samples": len(P), "spread_mm": round(spread, 1)})
+            print(f"   recorded ({mx:7.1f}, {my:7.1f})  from {len(P)} views, "
+                  f"spread {spread:.1f} mm"
+                  f"   [invented grid's nearest: {near.id} at {d:.0f} mm]")
+    except (KeyboardInterrupt, EOFError):
+        print()
+    finally:
+        lz.stop()
+
+    with open(out, "w", encoding="utf-8") as f:
+        json.dump({"seats": records, "pose": {"x": round(x, 1),
+                                              "y": round(y, 1),
+                                              "th_deg": round(math.degrees(th), 2)},
+                   "source": "calibrationmat.py --seats"}, f, indent=2)
+    print(f"[seats] wrote {len(records)} positions -> {out}")
 
 
 # --------------------------------------------------------------- storage
@@ -542,6 +683,11 @@ def main():
     ap.add_argument("--port", default=None)
     ap.add_argument("--tol", type=int, default=None)
     ap.add_argument("--status", action="store_true")
+    ap.add_argument("--seats", action="store_true",
+                    help="STEP 3: record where signs REALLY stand")
+    ap.add_argument("--at", help="x,y,deg rough pose, to settle which corridor")
+    ap.add_argument("--start", choices=["N","E","S","W"],
+                    help="which straight the car is in")
     ap.add_argument("--build", action="store_true",
                     help="stitch every lap on a common centre -> mat_grid.png")
     ap.add_argument("--draw", action="store_true",
@@ -552,6 +698,13 @@ def main():
 
     if args.status:
         status(args.out)
+        return
+    if args.seats:
+        at = None
+        if args.at:
+            gx, gy, gd = (float(v) for v in args.at.split(','))
+            at = (gx, gy, math.radians(gd))
+        capture_seats(at=at, start=args.start)
         return
     if args.build:
         build_map(args.out)
