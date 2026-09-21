@@ -28,6 +28,7 @@ import numpy as np
 from nav.localize import DistanceField, ScanMatcher, PoseFilter
 from nav.pillarmap import PillarMap, extract, RED, GREEN, UNKNOWN
 from nav import arena, parking as parking_mod
+from perception.tower import find_towers, tower_points
 
 _COLOR_NAME = {RED: "red", GREEN: "green", UNKNOWN: "unknown"}
 
@@ -45,6 +46,7 @@ LOGODDS_HIT = 0.85
 LOGODDS_MISS = 0.55
 LOGODDS_CLAMP = 4.0
 OCC_DECIDE = 1.2             # |log-odds| above this = a decided seat
+TOWER_MATCH_MM = 130.0       # a seat detection must coincide with a valley
 
 
 @dataclass
@@ -92,6 +94,7 @@ class WorldBelief:
         self.parking = None            # arena.ParkingBay once located
         self.unclassified = []         # non-seat detections (parking/noise)
         self.last_fit = None           # perception.fit.FitResult from fit_start
+        self.towers = []               # free-standing valleys, mat frame
         self._t0 = time.time()
 
     @property
@@ -273,7 +276,22 @@ class WorldBelief:
         rest = [d for d in dets_all
                 if not belongs_to_parking(d[0], d[1], self.parking)]
 
-        dets = [d for d in rest if arena.nearest_seat(d[0], d[1])[0] is not None]
+        # A seat detection must ALSO be a free-standing valley in the raw scan
+        # (LazyGo's tower test: depth > 200 mm, s = r*theta ~ 50 mm). That test
+        # uses no map and no pose, so it still holds when the pose is shaky -
+        # which is exactly when map-subtraction invents pillars out of wall
+        # residue. It is also what keeps the parking blocks out: flush to the
+        # wall, their valley is too shallow to qualify.
+        tpts = tower_points(list(r), self.pose, find_towers(list(r)))
+        self.towers = tpts
+
+        def _free_standing(d):
+            return any(math.hypot(d[0] - tx, d[1] - ty) < TOWER_MATCH_MM
+                       for (tx, ty) in tpts)
+
+        dets = [d for d in rest
+                if arena.nearest_seat(d[0], d[1])[0] is not None
+                and _free_standing(d)]
         self.unclassified = [d for d in rest
                              if arena.nearest_seat(d[0], d[1])[0] is None]
         self.pillars.update(dets, t_s, pose_healthy=pose_healthy)
