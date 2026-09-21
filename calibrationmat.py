@@ -364,9 +364,17 @@ def main():
                 n = ser.in_waiting
                 if n:
                     rx += ser.read(n)
+                    # OpenRound.cpp interleaves binary TELEM frames with its '#'
+                    # log lines on this one port. 0x55 0xAA cannot occur in
+                    # ASCII, so pull the frames out FIRST and treat only what is
+                    # left as text - otherwise the frames print as garbage and
+                    # are lost.
+                    rx, _got = drain_telem(rx, tel_head, tel_odo, tel_count)
                     *lines, rx = rx.split(b"\n")
                     for ln in lines:
-                        print("[stm32] " + ln.decode("ascii", "replace").rstrip())
+                        txt = ln.decode("ascii", "replace").rstrip()
+                        if txt:
+                            print("[stm32] " + txt)
                     if len(rx) > 512:
                         rx = b""
 
