@@ -59,6 +59,20 @@ class SeatBelief:
         return float(min(1.0, abs(self.logodds) / LOGODDS_CLAMP))
 
 
+def canonical_start(side="S", cw=True):
+    """The canonical start pose for a given start straight and driving
+    direction, mid-corridor at the side's mid-point. Because the mat is
+    4-fold symmetric, declaring the start straight is a free choice - this
+    just gives a consistent frame so no numeric guess is needed."""
+    cc = arena.CORRIDOR_CENTER
+    pos = {"N": (0.0, cc), "E": (cc, 0.0), "S": (0.0, -cc), "W": (-cc, 0.0)}
+    cw_head = {"N": 0.0, "E": -90.0, "S": 180.0, "W": 90.0}   # clockwise
+    th = cw_head[side] + (0.0 if cw else 180.0)
+    th = (th + 180.0) % 360.0 - 180.0
+    x, y = pos[side]
+    return (x, y, math.radians(th))
+
+
 class WorldBelief:
     def __init__(self, field: DistanceField | None = None,
                  sensor_ahead: float = 0.0):
@@ -77,6 +91,42 @@ class WorldBelief:
     @property
     def pose(self):
         return (self.filter.x, self.filter.y, self.filter.th)
+
+    def auto_init(self, ranges, cw=True, sides=("N", "E", "S", "W")):
+        """Self-localize with NO numeric guess - only the driving direction.
+
+        A single static scan of a bare square-in-square corridor is 4-fold
+        ambiguous: the walls look identical in all four corridors. The parking
+        bay breaks that tie because it exists in only ONE straight. So we try
+        the canonical start pose of each candidate straight, and prefer the one
+        whose scan actually yields two magenta blocks hugging the outer wall.
+        Score breaks any remaining tie. Returns (side, score, parking_seen).
+        """
+        r = list(ranges)
+        cands = []
+        for side in sides:
+            p0 = canonical_start(side, cw)
+            sc, x, y, th = self.matcher.match(r, *p0, self.sensor_ahead)
+            dets = extract(r, (x, y, th), self.field)
+            unc = [d for d in dets if arena.nearest_seat(d[0], d[1])[0] is None]
+            bay = parking_mod.detect(unc)
+            ahead = 0
+            if bay is not None:
+                # is the parking in the car's forward hemisphere? (the parking
+                # narrows 4 corridors to 2; "placed in front of the bay, facing
+                # the driving direction" breaks the remaining 180 deg flip)
+                cx, cy = 0.5 * (bay.rect[0] + bay.rect[2]), 0.5 * (bay.rect[1] + bay.rect[3])
+                fwd = (cx - x) * math.cos(th) + (cy - y) * math.sin(th)
+                ahead = 1 if fwd > 0 else 0
+            cands.append((1 if bay is not None else 0, ahead, sc, side, (x, y, th), bay))
+        # prefer: parking seen -> parking ahead -> best wall-match score
+        cands.sort(key=lambda c: (c[0], c[1], c[2]), reverse=True)
+        park, ahead, sc, side, (x, y, th), bay = cands[0]
+        self.filter.x, self.filter.y, self.filter.th = x, y, th
+        self.score = sc
+        if bay is not None:
+            self.parking = bay
+        return side, sc, bool(park)
 
     @property
     def healthy(self) -> bool:

@@ -38,8 +38,15 @@ def parse_guess(s):
 
 def _sim_source(seed, guess):
     sc = sim.random_scenario(seed=seed, n_pillars=6)
+    if guess is None:
+        # mimic "placed in front of the parking lot, facing clockwise" so
+        # auto-init has the asymmetric parking feature to lock onto
+        from nav import arena
+        sc.parking_side, sc.parking_along = "S", 0.0
+        truth = (0.0, -arena.CORRIDOR_CENTER, math.radians(180))
+    else:
+        truth = guess
     segs = sim.scenario_segments(sc)
-    truth = guess or (-1000.0, -1000.0, 0.0)
     rng = np.random.default_rng(seed)
 
     def gen():
@@ -88,14 +95,20 @@ def _live_source():
     return gen(), None, lz
 
 
-def run(source, guess, frames=12, settle=6):
+def run(source, guess, frames=12, cw=True):
     gen, truth, sc = source
     wb = WorldBelief()
     first = True
+    init_side = None
     for i in range(frames):
         ranges, cam = next(gen)
         if first:
-            wb.global_init(ranges, guess=guess)
+            if guess is not None:
+                wb.global_init(ranges, guess=guess)
+            else:
+                init_side, isc, seen = wb.auto_init(ranges, cw=cw)
+                print(f"auto-init: start straight = {init_side}  score {isc:.2f}  "
+                      f"parking {'CONFIRMED' if seen else 'not seen (fell back)'}")
             first = False
         else:
             wb.track(ranges)                # LiDAR-only (no IMU/encoder)
@@ -138,22 +151,24 @@ def main():
     ap.add_argument("--sim", action="store_true")
     ap.add_argument("--replay", metavar="NPZ")
     ap.add_argument("--live", action="store_true")
-    ap.add_argument("--guess", help="x,y,deg  (seed the fix / which corridor)")
+    ap.add_argument("--guess", help="x,y,deg  (override auto-init with an explicit pose)")
+    ap.add_argument("--ccw", action="store_true", help="counter-clockwise (default: clockwise)")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--frames", type=int, default=12)
     args = ap.parse_args()
 
-    guess = parse_guess(args.guess)
+    cw = not args.ccw
+    guess = parse_guess(args.guess)      # None -> auto-init from the parking bay
     if args.replay:
         src = _replay_source(args.replay)
     elif args.live:
         src = _live_source()
-        if guess is None:
-            guess = (-1000.0, -1000.0, 0.0)
     else:
+        # for a sim demo without an explicit guess, place the truth in a known
+        # start straight so auto-init has something to lock onto
         src = _sim_source(args.seed, guess)
 
-    wb, ranges, truth, sc = run(src, guess, frames=args.frames)
+    wb, ranges, truth, sc = run(src, guess, frames=args.frames, cw=cw)
     report(wb, truth=truth, sc=sc)
 
 

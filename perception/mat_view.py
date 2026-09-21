@@ -118,10 +118,11 @@ class LiveSource(threading.Thread):
 
     daemon = True
 
-    def __init__(self, start_pose=(-1000.0, -1000.0, 0.0), hz=10.0):
+    def __init__(self, guess=None, cw=True, hz=10.0):
         super().__init__()
         self.hz = hz
-        self.start_pose = start_pose
+        self.guess = guess          # None -> auto-init from the parking bay
+        self.cw = cw
         self._stop = threading.Event()
         self.wb = WorldBelief(sensor_ahead=0.0)
 
@@ -131,7 +132,6 @@ class LiveSource(threading.Thread):
         shared = SharedState()
         lz = LidarThread(shared)
         lz.start()
-        self.wb.pose = self.start_pose
         first = True
         last_rev = -1
         dt = 1.0 / self.hz
@@ -143,7 +143,14 @@ class LiveSource(threading.Thread):
             last_rev = lidar.rev
             ranges = lidar.ranges
             if first:
-                self.wb.global_init(ranges, guess=self.start_pose)
+                if self.guess is not None:
+                    self.wb.global_init(ranges, guess=self.guess)
+                else:
+                    side, sc, seen = self.wb.auto_init(ranges, cw=self.cw)
+                    print(f"auto-init: start straight = {side}  score {sc:.2f}  "
+                          f"parking {'CONFIRMED' if seen else 'not seen'} "
+                          f"(corridor is fixed up to a 180 deg flip from a static "
+                          f"scan; drive forward or pass --guess to pin it)")
             else:
                 self.wb.track(ranges)       # LiDAR-only pose (no IMU/encoder)
             self.wb.update(ranges)          # camera wiring is a later step
@@ -185,13 +192,20 @@ def main():
     ap.add_argument("--sim", action="store_true", help="synthetic scans, no hardware")
     ap.add_argument("--static", action="store_true", help="sim: park in one spot")
     ap.add_argument("--live", action="store_true", help="real RPLidar on the Pi")
+    ap.add_argument("--guess", help="x,y,deg  (override auto-init with an explicit pose)")
+    ap.add_argument("--ccw", action="store_true", help="counter-clockwise (default: clockwise)")
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8080)
     ap.add_argument("--seed", type=int, default=1)
     args = ap.parse_args()
 
+    guess = None
+    if args.guess:
+        gx, gy, gd = (float(v) for v in args.guess.split(","))
+        guess = (gx, gy, math.radians(gd))
+
     if args.live:
-        src = LiveSource()
+        src = LiveSource(guess=guess, cw=not args.ccw)
     else:
         src = SimSource(static=args.static, seed=args.seed)
     src.start()
