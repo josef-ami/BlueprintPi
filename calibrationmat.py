@@ -209,6 +209,117 @@ def fit_walls(path):
               "measured value before trusting any map-based pose.")
 
 
+# ------------------------------------------------------- drawing the map
+TICKS_PER_MM = 1.4853          # matches perception/nav.py
+
+
+def deadreckon(heading_deg, ticks):
+    """Path from the IMU heading and the cumulative encoder.
+
+    Heading is ABSOLUTE from the IMU, so it does not accumulate error the way
+    an integrated turn rate would; only the along-track distance drifts. Over
+    three laps that is good enough to see the arena's shape, which is all this
+    has to do - it is a drawing, not a pose estimate.
+    """
+    n = len(ticks)
+    x = np.zeros(n)
+    y = np.zeros(n)
+    for i in range(1, n):
+        if not (np.isfinite(ticks[i]) and np.isfinite(ticks[i - 1])
+                and np.isfinite(heading_deg[i])):
+            x[i], y[i] = x[i - 1], y[i - 1]
+            continue
+        d = (ticks[i] - ticks[i - 1]) / TICKS_PER_MM
+        if abs(d) > 200.0:                 # a reset or a dropped frame
+            d = 0.0
+        th = math.radians(heading_deg[i])
+        x[i] = x[i - 1] + d * math.cos(th)
+        y[i] = y[i - 1] + d * math.sin(th)
+    return x, y
+
+
+def draw_map(path, out="mat_map.png", stride=2, max_scans=1200):
+    """Stitch the recorded scans into one picture and fit lines to it."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    s = load_session(path)
+    R, H, K, run = s["ranges"], s["heading"], s["ticks"], s["run"]
+    have = np.isfinite(H) & np.isfinite(K)
+    print(f"[draw] {len(R)} revolutions, {int(have.sum())} with odometry")
+
+    fig, axes = plt.subplots(1, 2, figsize=(15, 7.2), facecolor="#0e1116")
+    for ax in axes:
+        ax.set_facecolor("#0b0e13")
+        ax.tick_params(colors="#8b93a1")
+        for sp in ax.spines.values():
+            sp.set_color("#2a2f3a")
+        ax.set_aspect("equal")
+
+    # ---- left: one scan, in the sensor frame, with the two walls fitted ----
+    ax = axes[0]
+    mid = len(R) // 2
+    scan = R[mid]
+    pts = []
+    idx = np.arange(360)
+    ok = np.isfinite(scan)
+    a = np.radians(idx[ok].astype(np.float64))
+    px, py = scan[ok] * np.cos(a), scan[ok] * np.sin(a)
+    ax.scatter(px, py, s=6, c="#4aa3ff", label="scan")
+    ax.scatter([0], [0], s=90, c="#ffd23f", marker="^", label="LiDAR")
+    for (lo, hi), col, nm in ((LEFT_SECTOR, "#30a46c", "left wall"),
+                              (RIGHT_SECTOR, "#e5484d", "right wall")):
+        f = _fit_line(_sector_points(scan, lo, hi))
+        if f is None:
+            continue
+        dist, ang, rms, _n = f
+        t = np.linspace(-900, 900, 2)
+        nx, ny = -math.sin(math.radians(ang)), math.cos(math.radians(ang))
+        # the fitted line passes at perpendicular distance `dist`; pick the
+        # sign that puts it on the same side as the points it came from
+        sp_ = _sector_points(scan, lo, hi)
+        sgn = 1.0 if (sp_ @ np.array([nx, ny])).mean() > 0 else -1.0
+        cx, cy = sgn * dist * nx, sgn * dist * ny
+        dx, dy = math.cos(math.radians(ang)), math.sin(math.radians(ang))
+        ax.plot(cx + t * dx, cy + t * dy, c=col, lw=2,
+                label=f"{nm} {dist:.0f}mm rms{rms:.0f}")
+    ax.set_title("one revolution, sensor frame", color="#e6e9ee")
+    ax.legend(facecolor="#171b22", labelcolor="#e6e9ee", fontsize=8)
+
+    # ---- right: every scan stitched by dead reckoning ----
+    ax = axes[1]
+    if have.sum() > 50:
+        X, Y = deadreckon(H, K)
+        sel = np.where(have)[0][:max_scans]
+        allx, ally = [], []
+        for i in sel:
+            sc = R[i]
+            o = np.isfinite(sc)
+            ii = idx[o][::stride]
+            rr = sc[o][::stride]
+            th = math.radians(H[i])
+            aa = np.radians(ii.astype(np.float64)) + th
+            allx.append(X[i] + rr * np.cos(aa))
+            ally.append(Y[i] + rr * np.sin(aa))
+        allx = np.concatenate(allx)
+        ally = np.concatenate(ally)
+        ax.scatter(allx, ally, s=1, c="#4aa3ff", alpha=0.25)
+        ax.plot(X[sel], Y[sel], c="#ffd23f", lw=1.2, label="path (dead reckoned)")
+        ax.legend(facecolor="#171b22", labelcolor="#e6e9ee", fontsize=8)
+        ax.set_title(f"{len(sel)} revolutions stitched by IMU heading + encoder",
+                     color="#e6e9ee")
+    else:
+        ax.text(0.5, 0.5, "no odometry in this session\n"
+                          "(flash firmware/OpenRound.cpp and re-record)",
+                ha="center", va="center", color="#8b93a1", transform=ax.transAxes)
+        ax.set_title("stitched map", color="#e6e9ee")
+
+    fig.tight_layout()
+    fig.savefig(out, dpi=130, facecolor="#0e1116")
+    print(f"[draw] wrote {out}")
+
+
 # --------------------------------------------------------------- storage
 def load_session(path):
     if not os.path.exists(path):
@@ -276,12 +387,17 @@ def main():
     ap.add_argument("--port", default=None)
     ap.add_argument("--tol", type=int, default=None)
     ap.add_argument("--status", action="store_true")
+    ap.add_argument("--draw", action="store_true",
+                    help="draw the recorded laps to mat_map.png")
     ap.add_argument("--fit", action="store_true",
                     help="STEP 2: fit the corridor walls from the recorded laps")
     args = ap.parse_args()
 
     if args.status:
         status(args.out)
+        return
+    if args.draw:
+        draw_map(args.out)
         return
     if args.fit:
         fit_walls(args.out)
