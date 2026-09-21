@@ -31,6 +31,13 @@ from nav import arena, parking as parking_mod
 
 _COLOR_NAME = {RED: "red", GREEN: "green", UNKNOWN: "unknown"}
 
+MIN_VALID = 30       # a scan with fewer usable returns is a spin-up/dropout frame
+
+
+def valid_count(ranges):
+    r = np.asarray(ranges, dtype=np.float64)
+    return int((np.isfinite(r) & (r > 80) & (r < 2600)).sum())
+
 SEAT_RADIUS_MM = 60.0        # how close a return must be to the seat centre
 CLEAR_MARGIN_MM = 70.0       # seen this far past a seat -> nothing there
 OCC_MAX_RANGE_MM = 2600.0
@@ -59,6 +66,9 @@ class SeatBelief:
         return float(min(1.0, abs(self.logodds) / LOGODDS_CLAMP))
 
 
+from perception.fit import canonical_start, fit as _fit, corridor_distances  # noqa: E402
+
+
 class WorldBelief:
     def __init__(self, field: DistanceField | None = None,
                  sensor_ahead: float = 0.0):
@@ -67,29 +77,118 @@ class WorldBelief:
         self.sensor_ahead = sensor_ahead
         self.pillars = PillarMap()
         self.seats = {s.id: SeatBelief(s) for s in arena.SEATS}
+        # wide matcher for the first fix / static drop: the car may be anywhere
+        # along a 1 m straight, so a +/-150 mm window (fine for tracking) can't
+        # reach it. +/-700 mm covers a whole straight section.
+        self.wide = ScanMatcher(self.field, win_xy=700.0, win_th=15.0,
+                                coarse_xy=40.0, coarse_th=3.0,
+                                fine_xy=10.0, fine_th=0.5)
         self.filter = PoseFilter(0.0, 0.0, 0.0, self.matcher,
                                  sensor_ahead=sensor_ahead)
         self.score = 0.0
         self.parking = None            # arena.ParkingBay once located
         self.unclassified = []         # non-seat detections (parking/noise)
+        self.last_fit = None           # perception.fit.FitResult from fit_start
         self._t0 = time.time()
 
     @property
     def pose(self):
         return (self.filter.x, self.filter.y, self.filter.th)
 
+    def auto_init(self, ranges, cw=True, sides=("N", "E", "S", "W")):
+        """Self-localize with NO numeric guess - only the driving direction.
+
+        A single static scan of a bare square-in-square corridor is 4-fold
+        ambiguous: the walls look identical in all four corridors. The parking
+        bay breaks that tie because it exists in only ONE straight. So we try
+        the canonical start pose of each candidate straight, and prefer the one
+        whose scan actually yields two magenta blocks hugging the outer wall.
+        Score breaks any remaining tie. Returns (side, score, parking_seen).
+        """
+        if valid_count(ranges) < MIN_VALID:
+            return None, 0.0, False
+        r = list(ranges)
+        cands = []
+        for side in sides:
+            bx, by, bth = canonical_start(side, cw)
+            ax, ay = math.cos(bth), math.sin(bth)
+            # sweep along the corridor, try both driving senses (front/back)
+            seeds = [(bx + d * ax, by + d * ay, bth + dh)
+                     for d in range(-700, 701, 100) for dh in (0.0, math.pi)]
+            sc, x, y, th = self._grid_match(r, seeds)
+            dets = extract(r, (x, y, th), self.field)
+            unc = [d for d in dets if arena.nearest_seat(d[0], d[1])[0] is None]
+            bay = parking_mod.detect(unc)
+            ahead = 0
+            if bay is not None:
+                # is the parking in the car's forward hemisphere? (the parking
+                # narrows 4 corridors to 2; "placed in front of the bay, facing
+                # the driving direction" breaks the remaining 180 deg flip)
+                cx, cy = 0.5 * (bay.rect[0] + bay.rect[2]), 0.5 * (bay.rect[1] + bay.rect[3])
+                fwd = (cx - x) * math.cos(th) + (cy - y) * math.sin(th)
+                ahead = 1 if fwd > 0 else 0
+            cands.append((1 if bay is not None else 0, ahead, sc, side, (x, y, th), bay))
+        # prefer: parking seen -> parking ahead -> best wall-match score
+        cands.sort(key=lambda c: (c[0], c[1], c[2]), reverse=True)
+        park, ahead, sc, side, (x, y, th), bay = cands[0]
+        self.filter.x, self.filter.y, self.filter.th = x, y, th
+        self.score = sc
+        if bay is not None:
+            self.parking = bay
+        return side, sc, bool(park)
+
     @property
     def healthy(self) -> bool:
         return self.filter.healthy
 
     # ---- localization ----
+    def fit_start(self, ranges, cw=None, car_len_mm=175.0,
+                  sides=("N", "E", "S", "W")):
+        """Systematic start-up fit: score every allowed pose on walls + seats +
+        parking and take the best. This is the recommended first fix - it needs
+        no guess, works out the driving direction, and uses the obstacles
+        themselves to pin the along-corridor position.
+
+        Returns the fit.FitResult (or None if the scan was unusable).
+        """
+        if valid_count(ranges) < MIN_VALID:
+            return None
+        res = _fit(ranges, self.field, self.matcher, cw=cw,
+                   car_len_mm=car_len_mm, sensor_ahead=self.sensor_ahead,
+                   sides=sides)
+        if res is None:
+            return None
+        self.filter.x, self.filter.y, self.filter.th = res.pose
+        self.score = res.wall
+        if res.parking is not None:
+            self.parking = res.parking
+        self.last_fit = res
+        return res
+
+    def _grid_match(self, ranges, seeds):
+        """Tight correlative match from every seed; return the best (sc,x,y,th).
+        A dense grid of tight matches is far more reliable on a partial/occluded
+        real scan than one match with a huge window (which lands in local maxima).
+        """
+        r = list(ranges)
+        best = (-1.0, 0.0, 0.0, 0.0)
+        for (x, y, th) in seeds:
+            sc, X, Y, T = self.matcher.match(r, x, y, th, self.sensor_ahead)
+            if sc > best[0]:
+                best = (sc, X, Y, T)
+        return best
+
     def global_init(self, ranges, guess=None):
-        """Ungated correlative match from `guess` - use for the first fix / a
-        static drop where the guess may be off by more than the tracking gate
-        would allow."""
+        """First fix from a rough `guess`. The unobservable axis is ALONG the
+        corridor, so sweep seeds down the heading direction (+/-700 mm) and let
+        each tight match recover lateral + heading. This tolerates a large
+        along-track error in the guess, which a single window cannot."""
+        if valid_count(ranges) < MIN_VALID:
+            return self.pose, 0.0
         gx, gy, gth = guess if guess is not None else self.pose
-        sc, x, y, th = self.matcher.match(list(ranges), gx, gy, gth,
-                                          self.sensor_ahead)
+        seeds = [(gx + d * math.cos(gth), gy + d * math.sin(gth), gth)
+                 for d in range(-700, 701, 100)]
+        sc, x, y, th = self._grid_match(ranges, seeds)
         self.score = sc
         if sc > 0.0:
             self.filter.x, self.filter.y, self.filter.th = x, y, th
@@ -105,8 +204,20 @@ class WorldBelief:
         near a corner or when a mapped pillar is in view, so mid-straight it is
         rough and can lag. That roughness is expected - the encoder + IMU are
         meant to sharpen it later (see predict()), not to be needed for it.
+
+        Uses the TIGHT matcher window around the current pose so a good static
+        lock is only nudged by noise, not dragged across the corridor. The wide
+        window is only for the first fix (global_init / auto_init).
         """
-        return self.global_init(ranges, guess=self.pose)
+        if valid_count(ranges) < MIN_VALID:
+            return self.pose, self.score       # skip spin-up/dropout frames
+        x0, y0, th0 = self.pose
+        sc, x, y, th = self.matcher.match(list(ranges), x0, y0, th0,
+                                          self.sensor_ahead)
+        self.score = sc
+        if sc > 0.0:
+            self.filter.x, self.filter.y, self.filter.th = x, y, th
+        return self.pose, sc
 
     # ---- optional LATER sharpening from IMU + encoder (not used by default) --
     def predict(self, d_mm, dth_rad):
@@ -228,6 +339,17 @@ class WorldBelief:
         if self.parking is not None:
             snap["parking"] = {"side": self.parking.side,
                                "rect": [round(v, 1) for v in self.parking.rect]}
+        if self.last_fit is not None:
+            f = self.last_fit
+            snap["fit"] = {"side": f.side, "wall": round(f.wall, 2),
+                           "seat": round(f.seat, 2), "park": round(f.park, 2),
+                           "total": round(f.total, 2),
+                           "hits": f.hits, "orphans": f.orphans,
+                           "ambiguous": f.ambiguous_with}
+        if ranges is not None:
+            d = corridor_distances(ranges)
+            snap["dist"] = {k: (round(v) if v is not None else None)
+                            for k, v in d.items()}
         if include_scan and ranges is not None:
             snap["scan"] = scan_points(self.pose, ranges)
         return snap

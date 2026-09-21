@@ -38,8 +38,15 @@ def parse_guess(s):
 
 def _sim_source(seed, guess):
     sc = sim.random_scenario(seed=seed, n_pillars=6)
+    if guess is None:
+        # mimic "placed in front of the parking lot, facing clockwise" so
+        # auto-init has the asymmetric parking feature to lock onto
+        from nav import arena
+        sc.parking_side, sc.parking_along = "S", 0.0
+        truth = (0.0, -arena.CORRIDOR_CENTER, math.radians(180))
+    else:
+        truth = guess
     segs = sim.scenario_segments(sc)
-    truth = guess or (-1000.0, -1000.0, 0.0)
     rng = np.random.default_rng(seed)
 
     def gen():
@@ -85,20 +92,35 @@ def _live_source():
                 continue
             last = lidar.rev
             yield list(lidar.ranges), None
-    return gen(), None, lz
+    return gen(), None, None        # no ground-truth scenario for live
 
 
-def run(source, guess, frames=12, settle=6):
+def run(source, guess, frames=12, cw=True, sides=("N", "E", "S", "W")):
     gen, truth, sc = source
     wb = WorldBelief()
-    first = True
-    for i in range(frames):
+    inited = False
+    last_ranges = None
+    tries = 0
+    # keep pulling scans until a real fix lands (early revs can be empty), then
+    # run `frames` more to let the semantic belief settle
+    while not inited and tries < 40:
         ranges, cam = next(gen)
-        if first:
-            wb.global_init(ranges, guess=guess)
-            first = False
+        tries += 1
+        if guess is not None:
+            _p, isc = wb.global_init(ranges, guess=guess)
+            inited = isc > 0.0
         else:
-            wb.track(ranges)                # LiDAR-only (no IMU/encoder)
+            res = wb.fit_start(ranges, cw=cw, sides=sides)
+            inited = res is not None
+            if inited:
+                print("=== START FIT (walls + seats + parking) ===")
+                print(res.explain())
+        if inited:
+            wb.update(ranges, cam_dets=cam)
+            last_ranges = ranges
+    for _ in range(frames):
+        ranges, cam = next(gen)
+        wb.track(ranges)                    # LiDAR-only (no IMU/encoder)
         wb.update(ranges, cam_dets=cam)
         last_ranges = ranges
     return wb, last_ranges, truth, sc
@@ -138,22 +160,28 @@ def main():
     ap.add_argument("--sim", action="store_true")
     ap.add_argument("--replay", metavar="NPZ")
     ap.add_argument("--live", action="store_true")
-    ap.add_argument("--guess", help="x,y,deg  (seed the fix / which corridor)")
+    ap.add_argument("--guess", help="x,y,deg  (override auto-init with an explicit pose)")
+    ap.add_argument("--cw", action="store_true", help="force clockwise (default: infer from the scan)")
+    ap.add_argument("--ccw", action="store_true", help="force counter-clockwise")
+    ap.add_argument("--start", choices=["N","E","S","W"],
+                    help="which straight the car starts in (resolves the rotation)")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--frames", type=int, default=12)
     args = ap.parse_args()
 
-    guess = parse_guess(args.guess)
+    cw = True if args.cw else (False if args.ccw else None)
+    guess = parse_guess(args.guess)      # None -> auto-init from the parking bay
     if args.replay:
         src = _replay_source(args.replay)
     elif args.live:
         src = _live_source()
-        if guess is None:
-            guess = (-1000.0, -1000.0, 0.0)
     else:
+        # for a sim demo without an explicit guess, place the truth in a known
+        # start straight so auto-init has something to lock onto
         src = _sim_source(args.seed, guess)
 
-    wb, ranges, truth, sc = run(src, guess, frames=args.frames)
+    sides = (args.start,) if args.start else ("N", "E", "S", "W")
+    wb, ranges, truth, sc = run(src, guess, frames=args.frames, cw=cw, sides=sides)
     report(wb, truth=truth, sc=sc)
 
 
