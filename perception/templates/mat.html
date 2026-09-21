@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blueprint - virtual mat</title>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#171b22; --line:#2a2f3a; --dim:#8b93a1; --text:#e6e9ee;
+    --wall:#c9d1dc; --seat:#3a4150; --empty:#232a36; --red:#e5484d; --green:#30a46c;
+    --scan:#4aa3ff; --pose:#ffd23f; --park:#c026d3; --accent:#4aa3ff;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font:14px/1.4 ui-sans-serif,system-ui,Segoe UI,Roboto,Arial}
+  header{padding:10px 16px;border-bottom:1px solid var(--line);
+    display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+  header b{font-size:15px}
+  .tag{font-size:11px;color:var(--dim);border:1px solid var(--line);
+    border-radius:99px;padding:2px 9px}
+  .wrap{display:flex;gap:16px;padding:16px;flex-wrap:wrap;align-items:flex-start}
+  .stage{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px}
+  canvas{display:block;background:#0b0e13;border-radius:8px;width:min(74vw,640px);height:auto;touch-action:none}
+  .side{min-width:240px;flex:1 1 240px;display:flex;flex-direction:column;gap:12px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px}
+  .card h2{margin:0 0 8px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--dim)}
+  .kv{display:grid;grid-template-columns:1fr auto;gap:4px 10px}
+  .kv .v{font-variant-numeric:tabular-nums;color:var(--text)}
+  .legend{display:flex;flex-wrap:wrap;gap:10px;font-size:12px;color:var(--dim)}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:3px;vertical-align:-1px;margin-right:5px}
+  table{width:100%;border-collapse:collapse;font-size:12px}
+  td{padding:2px 4px;border-bottom:1px solid var(--line)}
+  .pill{padding:1px 7px;border-radius:99px;font-size:11px}
+  .st-empty{color:var(--dim)} .st-red{color:var(--red)} .st-green{color:var(--green)}
+  .st-pillar{color:var(--pose)} .st-unknown{color:#5b6472}
+  .dot{width:8px;height:8px;border-radius:99px;display:inline-block;margin-right:6px}
+  #status{margin-left:auto;font-size:12px;color:var(--dim)}
+</style>
+</head>
+<body>
+<header>
+  <b>Blueprint · Virtual Mat</b>
+  <span class="tag" id="mode">-</span>
+  <span class="tag">WRO FE 2026</span>
+  <span id="status"><span class="dot" style="background:#555" id="live-dot"></span>connecting…</span>
+</header>
+<div class="wrap">
+  <div class="stage">
+    <canvas id="mat" width="680" height="680"></canvas>
+  </div>
+  <div class="side">
+    <div class="card">
+      <h2>Pose (mat frame, mm)</h2>
+      <div class="kv">
+        <div>x</div><div class="v" id="px">–</div>
+        <div>y</div><div class="v" id="py">–</div>
+        <div>heading</div><div class="v" id="pth">–</div>
+        <div>match score</div><div class="v" id="score">–</div>
+        <div>scan points</div><div class="v" id="npts">–</div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Legend</h2>
+      <div class="legend">
+        <span><span class="sw" style="background:var(--wall)"></span>wall</span>
+        <span><span class="sw" style="background:var(--scan)"></span>scan</span>
+        <span><span class="sw" style="background:var(--pose)"></span>pose</span>
+        <span><span class="sw" style="background:var(--red)"></span>red sign</span>
+        <span><span class="sw" style="background:var(--green)"></span>green sign</span>
+        <span><span class="sw" style="background:var(--empty);border:1px solid #3a4150"></span>empty seat</span>
+        <span><span class="sw" style="background:var(--park)"></span>parking</span>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Seats (<span id="decided">0</span> decided)</h2>
+      <table><tbody id="seats"></tbody></table>
+    </div>
+  </div>
+</div>
+<script>
+const cv = document.getElementById('mat'), ctx = cv.getContext('2d');
+const MM = 1700;                 // half-extent drawn (mm) -> covers 3000 mat + margin
+function T(x, y){                // mat mm -> canvas px (y up -> down)
+  const s = cv.width/(2*MM);
+  return [cv.width/2 + x*s, cv.height/2 - y*s];
+}
+const COL = {unknown:'#5b6472', empty:'#232a36', pillar:'#ffd23f', red:'#e5484d', green:'#30a46c'};
+
+function square(cx, cy, side, fill, stroke){
+  const [ax,ay]=T(cx-side/2, cy+side/2), [bx,by]=T(cx+side/2, cy-side/2);
+  if(fill){ctx.fillStyle=fill; ctx.fillRect(ax,ay,bx-ax,by-ay);}
+  if(stroke){ctx.strokeStyle=stroke; ctx.lineWidth=1; ctx.strokeRect(ax,ay,bx-ax,by-ay);}
+}
+function walls(a){
+  ctx.strokeStyle=getCss('--wall'); ctx.lineWidth=3;
+  for(const s of [a.outer, a.inner]){
+    const [ax,ay]=T(-s/2, s/2), [bx,by]=T(s/2,-s/2);
+    ctx.strokeRect(ax,ay,bx-ax,by-ay);
+  }
+}
+function getCss(v){return getComputedStyle(document.documentElement).getPropertyValue(v).trim();}
+
+function draw(d){
+  ctx.clearRect(0,0,cv.width,cv.height);
+  if(!d || !d.arena) return;
+  walls(d.arena);
+  // parking
+  if(d.parking){const r=d.parking.rect; const [ax,ay]=T(r[0],r[3]),[bx,by]=T(r[2],r[1]);
+    ctx.fillStyle='rgba(192,38,211,.22)'; ctx.strokeStyle=getCss('--park'); ctx.lineWidth=2;
+    ctx.fillRect(ax,ay,bx-ax,by-ay); ctx.strokeRect(ax,ay,bx-ax,by-ay);}
+  // seats
+  for(const s of d.seats||[]){
+    const c = COL[s.state]||COL.unknown;
+    square(s.x, s.y, 70, s.state==='empty'?COL.empty:c, '#3a4150');
+  }
+  // scan
+  if(d.scan){ctx.fillStyle=getCss('--scan');
+    for(const p of d.scan){const [x,y]=T(p[0],p[1]); ctx.fillRect(x-1.2,y-1.2,2.4,2.4);}}
+  // ground-truth ghost (sim only) - shows how close the LiDAR-only estimate is
+  if(d.truth){const [tx,ty]=T(d.truth.x,d.truth.y);
+    ctx.strokeStyle='rgba(230,233,238,.35)'; ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.arc(tx,ty,7,0,7); ctx.stroke();}
+  // pose triangle
+  if(d.pose){const th=d.pose.th_deg*Math.PI/180; const [cx,cy]=T(d.pose.x,d.pose.y);
+    ctx.save(); ctx.translate(cx,cy); ctx.rotate(-th); ctx.fillStyle=getCss('--pose');
+    ctx.beginPath(); ctx.moveTo(14,0); ctx.lineTo(-8,7); ctx.lineTo(-8,-7); ctx.closePath(); ctx.fill();
+    ctx.restore();}
+  // panel
+  set('px',d.pose?d.pose.x:'–'); set('py',d.pose?d.pose.y:'–');
+  set('pth',d.pose?d.pose.th_deg+'°':'–'); set('score',d.score);
+  set('npts',d.scan?d.scan.length:'–');
+  const dec=(d.seats||[]).filter(s=>s.state!=='unknown');
+  set('decided',dec.length);
+  const tb=document.getElementById('seats'); tb.innerHTML='';
+  for(const s of dec.sort((a,b)=>a.id<b.id?-1:1)){
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td>${s.id}</td><td class="st-${s.state}">${s.state}</td>`+
+      `<td style="text-align:right;color:var(--dim)">${s.conf}</td>`;
+    tb.appendChild(tr);
+  }
+}
+function set(id,v){const e=document.getElementById(id); if(e)e.textContent=(v===undefined||v===null)?'–':v;}
+
+const es = new EventSource('events');
+es.onopen=()=>{document.getElementById('live-dot').style.background='#30a46c';
+  document.getElementById('status').lastChild.textContent='live';};
+es.onerror=()=>{document.getElementById('live-dot').style.background='#e5484d';
+  document.getElementById('status').lastChild.textContent='reconnecting…';};
+es.onmessage=e=>{try{const d=JSON.parse(e.data); if(d.mode)set('mode',d.mode); draw(d);}catch(err){}};
+</script>
+</body>
+</html>
