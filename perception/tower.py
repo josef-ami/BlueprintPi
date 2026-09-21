@@ -49,8 +49,70 @@ class Tower:
     i1: int
 
 
+MERGE_MM = 120.0         # across a dropout, this close in range = same object
+
+
 def _valid(r):
     return np.isfinite(r) & (r > MIN_RANGE_MM) & (r < MAX_RANGE_MM)
+
+
+def segments(r, ok, n, max_gap=MAX_GAP, merge_mm=MERGE_MM):
+    """Split the scan into objects, tolerating dropouts.
+
+    A real RPLidar drops rays AT the edges of things, so on live data there is
+    usually no sharp adjacent step to find - the sign is separated from the
+    wall by a run of inf, not by a 300 mm jump between neighbouring bins. So
+    group the valid returns instead: start a new group when the angular gap is
+    too wide, or when the range jumps across that gap.
+    """
+    idxs = [i for i in range(n) if ok[i]]
+    if not idxs:
+        return []
+    groups, cur = [], [idxs[0]]
+    for i in idxs[1:]:
+        gap = i - cur[-1]
+        jump = abs(float(r[i]) - float(r[cur[-1]]))
+        if gap > max_gap + 1 or jump > merge_mm:
+            groups.append(cur)
+            cur = [i]
+        else:
+            cur.append(i)
+    groups.append(cur)
+    # stitch across 0 deg if the ends belong together
+    if len(groups) > 1:
+        a, b = groups[-1], groups[0]
+        if (b[0] + n - a[-1]) <= max_gap + 1 and \
+                abs(float(r[b[0]]) - float(r[a[-1]])) <= merge_mm:
+            groups[0] = a + b
+            groups.pop()
+    return groups
+
+
+def _find_by_segments(r, ok, n, min_depth, size_min, size_max):
+    """An object is a segment that sits closer than BOTH of its neighbours."""
+    groups = segments(r, ok, n)
+    if len(groups) < 3:
+        return []
+    means = [float(np.mean(r[g])) for g in groups]
+    out = []
+    for k, g in enumerate(groups):
+        prev_m = means[(k - 1) % len(groups)]
+        next_m = means[(k + 1) % len(groups)]
+        near = float(np.min(r[g]))
+        depth = min(prev_m, next_m) - near
+        if depth < min_depth:
+            continue
+        span = (g[-1] - g[0]) % n + 1
+        if span > MAX_WIDTH_DEG:
+            continue
+        size = means[k] * math.radians(span)
+        if not (size_min <= size <= size_max):
+            continue
+        mid = g[len(g) // 2]
+        out.append(Tower(bearing_deg=float(mid if mid <= 180 else mid - 360),
+                         range_mm=near, size_mm=size, depth_mm=depth,
+                         width_deg=float(span), i0=g[0], i1=g[-1]))
+    return out
 
 
 def find_towers(ranges, min_depth=MIN_DEPTH_MM,
@@ -65,6 +127,12 @@ def find_towers(ranges, min_depth=MIN_DEPTH_MM,
     if ok.sum() < 8:
         return []
 
+    out = _find_by_segments(r, ok, n, min_depth, size_min, size_max)
+    if out:
+        out.sort(key=lambda t: t.range_mm)
+        return out
+
+    # fallback: the sharp-adjacent-step form, for clean/simulated scans
     out = []
     for a in range(n):
         b = (a + 1) % n
