@@ -56,3 +56,34 @@ def test_seats_share_a_station_across_the_corridor():
     assert len(riv) == 1
     assert riv[0].station == s.station and riv[0].id != s.id
     assert riv[0].along == s.along and riv[0].lat != s.lat
+
+
+def test_parking_tracker_votes_instead_of_believing_the_last_frame():
+    """The bay is bolted to the mat for the whole round, so a detection that
+    moves between frames is noise. Publishing the newest one every frame made
+    the bay jump between walls on the real mat."""
+    from nav.parking import ParkingTracker
+    t = ParkingTracker()
+    true = arena.parking_bay("S", 0.0, 175.0)
+    noise_e = arena.parking_bay("E", 400.0, 175.0)
+    noise_n = arena.parking_bay("N", -100.0, 175.0)
+
+    # a consistent bay (CONFIRM sightings), peppered with one-off noise
+    for b in (true, noise_e, true, noise_n, true, noise_e, true):
+        t.update(b)
+    assert t.confirmed
+    assert t.best.side == "S"
+    assert abs(t.best.along_center) < 60
+
+    # one more stray sighting must NOT move a confirmed bay
+    t.update(noise_e)
+    assert t.best.side == "S"
+
+
+def test_parking_tracker_withholds_until_confirmed():
+    from nav.parking import ParkingTracker
+    t = ParkingTracker()
+    bay = arena.parking_bay("S", 0.0, 175.0)
+    for _ in range(ParkingTracker.CONFIRM - 1):
+        assert t.update(bay) is None        # not enough evidence yet
+    assert t.update(bay) is not None        # now it is

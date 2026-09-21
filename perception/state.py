@@ -95,6 +95,7 @@ class WorldBelief:
         self.unclassified = []         # non-seat detections (parking/noise)
         self.last_fit = None           # perception.fit.FitResult from fit_start
         self.towers = []               # free-standing valleys, mat frame
+        self.park_tracker = parking_mod.ParkingTracker()
         self._t0 = time.time()
 
     @property
@@ -271,8 +272,10 @@ class WorldBelief:
         bay = fit_parking_points(list(r), self.pose, self.field, car_len)
         if bay is None:                      # fall back to the centroid pattern
             bay, _used = fit_parking(dets_all, car_len)
-        if bay is not None and pose_healthy:
-            self.parking = bay
+        # vote rather than overwrite: the bay is fixed for the round, so a
+        # detection that moves between frames is noise, not the bay moving
+        if pose_healthy:
+            self.parking = self.park_tracker.update(bay) or self.parking
         rest = [d for d in dets_all
                 if not belongs_to_parking(d[0], d[1], self.parking)]
 
