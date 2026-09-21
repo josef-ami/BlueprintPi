@@ -60,6 +60,15 @@
       </div>
     </div>
     <div class="card">
+      <h2>Navigator</h2>
+      <div class="kv">
+        <div>state</div><div class="v" id="nstate">–</div>
+        <div>direction</div><div class="v" id="ndir">–</div>
+        <div>section</div><div class="v" id="nsec">–</div>
+        <div>corners / laps</div><div class="v" id="nlap">–</div>
+      </div>
+    </div>
+    <div class="card">
       <h2>Corridor (mm)</h2>
       <div class="kv">
         <div>front</div><div class="v" id="dfront">–</div>
@@ -148,6 +157,12 @@ function draw(d){
   set('px',d.pose?d.pose.x:'–'); set('py',d.pose?d.pose.y:'–');
   set('pth',d.pose?d.pose.th_deg+'°':'–'); set('score',d.score);
   set('npts',d.scan?d.scan.length:'–');
+  const N=d.nav;
+  if(N){set('nstate',N.state); set('ndir',N.direction); set('nsec',N.section);
+    set('nlap',N.corners+' / '+N.laps);
+    const e=document.getElementById('nstate');
+    if(e) e.style.color = N.state==='LOCKED' ? 'var(--green)'
+        : (N.state==='LOST' ? 'var(--red)' : 'var(--dim)');}
   const D=d.dist||{};
   set('dfront',D.front); set('dleft',D.left); set('dright',D.right);
   set('dsum',(D.left!=null&&D.right!=null)?(D.left+D.right):'–');

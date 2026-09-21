@@ -27,6 +27,7 @@ import numpy as np
 from flask import Flask, Response, render_template
 
 from perception.state import WorldBelief
+from perception.nav import Navigator
 from perception import sim
 from nav.pillarmap import RED, GREEN
 
@@ -62,8 +63,8 @@ class SimSource(threading.Thread):
         self.rng = np.random.default_rng(seed)
         self.sc = sim.random_scenario(seed=seed, n_pillars=6)
         self.segs = sim.scenario_segments(self.sc)
-        self.wb = WorldBelief()
-        self.wb.set_parking(self.sc.parking())
+        self.nav = Navigator()
+        self.wb = self.nav.wb
         self._stop = threading.Event()
 
     def _truth_poses(self):
@@ -84,13 +85,8 @@ class SimSource(threading.Thread):
         dt = 1.0 / self.hz
         for truth in gen:
             r, q = sim.synth_scan(truth, self.segs, rng=self.rng)
-            if first:
-                self.wb.global_init(r, guess=truth)   # seed which corridor
-            else:
-                self.wb.track(r)                      # LiDAR-only, no odometry
-            cam = self._camera(truth)
-            self.wb.update(r, cam_dets=cam)
-            snap = self.wb.snapshot(ranges=r)
+            self.nav.step(r, cam_dets=self._camera(truth))
+            snap = self.nav.snapshot(ranges=r)
             snap["mode"] = "SIM · static" if self.static else "SIM · driving (LiDAR only)"
             snap["truth"] = {"x": round(truth[0], 1), "y": round(truth[1], 1),
                              "th_deg": round(math.degrees(truth[2]), 1)}
@@ -125,7 +121,8 @@ class LiveSource(threading.Thread):
         self.cw_hint = cw           # None -> work the direction out from the scan
         self.sides = sides          # restrict to one straight to fix the rotation
         self._stop = threading.Event()
-        self.wb = WorldBelief(sensor_ahead=0.0)
+        self.nav = Navigator(sides=self.sides, cw=self.cw_hint)
+        self.wb = self.nav.wb
 
     def run(self):
         from worldstate import SharedState
@@ -133,7 +130,7 @@ class LiveSource(threading.Thread):
         shared = SharedState()
         lz = LidarThread(shared)
         lz.start()
-        first = True
+        announced = False
         last_rev = -1
         dt = 1.0 / self.hz
         while not self._stop.is_set():
@@ -143,24 +140,13 @@ class LiveSource(threading.Thread):
                 continue
             last_rev = lidar.rev
             ranges = lidar.ranges
-            if first:
-                if self.guess is not None:
-                    _p, sc = self.wb.global_init(ranges, guess=self.guess)
-                    first = sc <= 0.0            # retry until a real fix lands
-                else:
-                    res = self.wb.fit_start(ranges, cw=self.cw_hint, sides=self.sides)
-                    first = res is None
-                    if res is not None:
-                        print("=== START FIT ===\n" + res.explain())
-                if first:
-                    continue                    # empty/spin-up scan, wait
-            else:
-                self.wb.track(ranges)       # LiDAR-only pose (no IMU/encoder)
-            self.wb.update(ranges)          # camera wiring is a later step
-            snap = self.wb.snapshot(ranges=ranges)
+            self.nav.step(ranges)        # fit -> track -> update, with recovery
+            if not announced and self.nav.fit is not None:
+                print("=== START FIT ===\n" + self.nav.fit.explain())
+                announced = True
+            snap = self.nav.snapshot(ranges=ranges)
             snap["mode"] = "LIVE · RPLidar"
             publish(snap)
-            first = False
             time.sleep(dt)
         lz.stop()
 
