@@ -66,7 +66,18 @@
         <div>direction</div><div class="v" id="ndir">–</div>
         <div>section</div><div class="v" id="nsec">–</div>
         <div>corners / laps</div><div class="v" id="nlap">–</div>
+        <div>odometry</div><div class="v" id="nodo">–</div>
       </div>
+    </div>
+    <div class="card">
+      <h2>STM32 telemetry</h2>
+      <div class="kv">
+        <div>frames / bad</div><div class="v" id="tfr">–</div>
+        <div>IMU</div><div class="v" id="timu">–</div>
+        <div>heading</div><div class="v" id="thd">–</div>
+        <div>encoder ticks</div><div class="v" id="todo">–</div>
+      </div>
+      <div class="hint" id="thint" style="font-size:11px;color:var(--dim);margin-top:6px"></div>
     </div>
     <div class="card">
       <h2>Corridor (mm)</h2>
@@ -160,9 +171,26 @@ function draw(d){
   const N=d.nav;
   if(N){set('nstate',N.state); set('ndir',N.direction); set('nsec',N.section);
     set('nlap',N.corners+' / '+N.laps);
+    set('nodo', N.odometry ? 'live (IMU+encoder)' : 'none (LiDAR only)');
+    const eo=document.getElementById('nodo');
+    if(eo) eo.style.color = N.odometry ? 'var(--green)' : 'var(--dim)';
     const e=document.getElementById('nstate');
     if(e) e.style.color = N.state==='LOCKED' ? 'var(--green)'
         : (N.state==='LOST' ? 'var(--red)' : 'var(--dim)');}
+  const T=d.telem;
+  const th=document.getElementById('thint');
+  if(T){set('tfr',T.frames+' / '+T.bad); set('timu',T.imu_ok?'OK':'no fix');
+    set('thd',T.heading_deg==null?'–':T.heading_deg+'°');
+    set('todo',T.odo_ticks==null?'–':T.odo_ticks);
+    const ei=document.getElementById('timu');
+    if(ei) ei.style.color=T.imu_ok?'var(--green)':'var(--red)';
+    if(th) th.textContent = T.frames===0
+      ? 'no frames yet — check the STM32 is powered and on the right port'
+      : (T.bad>T.frames*0.1 ? 'many bad frames — check baud / wiring' : '');
+  } else {
+    set('tfr','off'); set('timu','–'); set('thd','–'); set('todo','–');
+    if(th) th.textContent='not enabled — start with --telemetry to use IMU+encoder';
+  }
   const D=d.dist||{};
   set('dfront',D.front); set('dleft',D.left); set('dright',D.right);
   set('dsum',(D.left!=null&&D.right!=null)?(D.left+D.right):'–');

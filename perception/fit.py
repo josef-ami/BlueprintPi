@@ -110,6 +110,101 @@ def _along_on_side(x, y):
     return side, (x if side in ("N", "S") else y)
 
 
+PARK_GAP_MATCH_MM = 90.0     # the two blocks stand off the wall by the same amount
+PARK_CLUSTER_GAP_MM = 90.0   # split wall-hugging points into blocks
+
+
+def nonwall_points(ranges, pose, field, max_range=2600.0, wall_reject=75.0):
+    """Map-subtracted scan points, in the mat frame, with NO width filtering.
+
+    pillarmap.extract() throws away any cluster wider than 130 mm because it is
+    looking for 50 mm signs. A parking block is 200 mm long, so seen side-on it
+    is discarded before anything can recognise it. Parking therefore needs its
+    own extraction rather than a reuse of the pillar one.
+    """
+    x0, y0, th = pose
+    r = np.asarray(ranges, dtype=np.float64)
+    idx = np.arange(360)
+    ok = np.isfinite(r) & (r > 90.0) & (r < max_range)
+    if ok.sum() < 3:
+        return np.empty((0, 2))
+    a = np.radians(idx[ok].astype(np.float64)) + th
+    px = x0 + r[ok] * np.cos(a)
+    py = y0 + r[ok] * np.sin(a)
+    keep = field.dist(px, py) > wall_reject
+    return np.stack([px[keep], py[keep]], axis=1)
+
+
+def find_parking_points(ranges, pose, field, car_len_mm=175.0):
+    """The two magenta blocks, straight from the point cloud.
+
+    A block hugs an outer wall. Two of them stand 1.5 car-lengths apart along
+    that wall and stick out from it by the same amount - that pair, and its
+    even spacing off the wall, is what separates a real bay from two unrelated
+    corner artefacts.
+    """
+    pts = nonwall_points(ranges, pose, field)
+    if len(pts) < 4:
+        return None
+    hug = []
+    for (x, y) in pts:
+        side, along = _along_on_side(x, y)
+        gap = _wall_gap(x, y)
+        if gap <= PARK_WALL_GAP_MM:
+            hug.append((side, along, gap))
+    if len(hug) < 4:
+        return None
+    best = None
+    for side in ("N", "E", "S", "W"):
+        grp = sorted([(a, g) for (s, a, g) in hug if s == side])
+        if len(grp) < 4:
+            continue
+        # split into runs along the wall
+        runs, cur = [], [grp[0]]
+        for prev, nxt in zip(grp, grp[1:]):
+            if nxt[0] - prev[0] > PARK_CLUSTER_GAP_MM:
+                runs.append(cur)
+                cur = []
+            cur.append(nxt)
+        runs.append(cur)
+        runs = [rn for rn in runs if len(rn) >= 2]
+        for i in range(len(runs)):
+            for j in range(i + 1, len(runs)):
+                ai = float(np.mean([a for a, _g in runs[i]]))
+                aj = float(np.mean([a for a, _g in runs[j]]))
+                gi = float(np.mean([g for _a, g in runs[i]]))
+                gj = float(np.mean([g for _a, g in runs[j]]))
+                sep = abs(ai - aj)
+                if not (PARK_SEP_MIN_MM <= sep <= PARK_SEP_MAX_MM):
+                    continue
+                if abs(gi - gj) > PARK_GAP_MATCH_MM:
+                    continue            # unrelated artefacts, not a matched pair
+                score = abs(gi - gj)
+                if best is None or score < best[0]:
+                    best = (score, side, 0.5 * (ai + aj), sep)
+    if best is None:
+        return None
+    _s, side, centre, sep = best
+    return arena.parking_bay(side, centre, sep / 1.5)
+
+
+def belongs_to_parking(x, y, bay, margin=130.0):
+    """Is this detection part of the located bay rather than a traffic sign?
+
+    Used to stop the two blocks being consumed as pillars: they hug the same
+    outer wall over the bay's span, whereas a sign sits well inside the corridor.
+    """
+    if bay is None:
+        return False
+    side, along = _along_on_side(x, y)
+    if side != bay.side:
+        return False
+    if _wall_gap(x, y) > PARK_WALL_GAP_MM + margin:
+        return False
+    half = bay.length / 2.0 + arena.MAGENTA_THICK + margin
+    return abs(along - bay.along_center) <= half
+
+
 def find_parking(clusters, car_len_mm=175.0):
     """Two clusters hugging the same outer wall, 1.5 car-lengths apart, are the
     magenta blocks. Returns (ParkingBay, {ids of clusters used}) or (None, set()).

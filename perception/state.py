@@ -66,7 +66,10 @@ class SeatBelief:
         return float(min(1.0, abs(self.logodds) / LOGODDS_CLAMP))
 
 
-from perception.fit import canonical_start, fit as _fit, corridor_distances  # noqa: E402
+from perception.fit import (canonical_start, fit as _fit, corridor_distances,
+                            find_parking as fit_parking,
+                            find_parking_points as fit_parking_points,
+                            belongs_to_parking)  # noqa: E402
 
 
 class WorldBelief:
@@ -255,9 +258,23 @@ class WorldBelief:
         # keep detections that snap to one; the rest (parking blocks, noise)
         # are held separately for the parking detector and debugging.
         dets_all = extract(list(r), self.pose, self.field)
-        dets = [d for d in dets_all
-                if arena.nearest_seat(d[0], d[1])[0] is not None]
-        self.unclassified = [d for d in dets_all
+
+        # PARKING IS CLAIMED FIRST. The two magenta blocks sit against the outer
+        # wall and, seen end-on, look exactly like a pair of small pillars - so
+        # if seats got first refusal they would swallow the blocks and the bay
+        # would never be found. Claim the parking pattern, then let the seats
+        # have whatever is genuinely left.
+        car_len = self.parking.car_len_mm if self.parking else 175.0
+        bay = fit_parking_points(list(r), self.pose, self.field, car_len)
+        if bay is None:                      # fall back to the centroid pattern
+            bay, _used = fit_parking(dets_all, car_len)
+        if bay is not None and pose_healthy:
+            self.parking = bay
+        rest = [d for d in dets_all
+                if not belongs_to_parking(d[0], d[1], self.parking)]
+
+        dets = [d for d in rest if arena.nearest_seat(d[0], d[1])[0] is not None]
+        self.unclassified = [d for d in rest
                              if arena.nearest_seat(d[0], d[1])[0] is None]
         self.pillars.update(dets, t_s, pose_healthy=pose_healthy)
         if cam_dets:
@@ -267,13 +284,6 @@ class WorldBelief:
         # 2) per-seat occupancy log-odds from this scan
         self._update_seats(r)
 
-        # 2b) locate the parking bay from the non-seat returns
-        if pose_healthy and self.unclassified:
-            bay = parking_mod.detect(self.unclassified,
-                                     car_len_mm=self.parking.car_len_mm
-                                     if self.parking else 175.0)
-            if bay is not None:
-                self.parking = bay
 
         # 3) attach colours + occupancy from confirmed pillars to their seats
         for p in self.pillars.confirmed():
@@ -283,7 +293,24 @@ class WorldBelief:
                 sb.logodds = min(LOGODDS_CLAMP, max(sb.logodds, OCC_DECIDE + 0.5))
                 if p.color != UNKNOWN:
                     sb.color = p.color
+
+        # 4) one sign per line (see arena.Seat.station). A card never places two
+        # signs abreast - the car would have to pass one on the right and the
+        # other on the left at the same instant. So if a line shows two, only the
+        # stronger can be real; the loser is pushed back to 'unknown'.
+        self._enforce_one_per_station()
         return self.snapshot(include_scan=False)
+
+    def _enforce_one_per_station(self):
+        for station, seats in arena.SEATS_BY_STATION.items():
+            occupied = [self.seats[s.id] for s in seats
+                        if self.seats[s.id].logodds > OCC_DECIDE]
+            if len(occupied) < 2:
+                continue
+            occupied.sort(key=lambda sb: sb.logodds, reverse=True)
+            for loser in occupied[1:]:
+                loser.logodds = 0.0          # back to unknown, not 'empty'
+                loser.color = UNKNOWN
 
     def _update_seats(self, r):
         x0, y0, th = self.pose
