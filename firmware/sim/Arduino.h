@@ -19,8 +19,7 @@
 #define INPUT_PULLUP 2
 enum { PA0,PA1,PA2,PA3,PA4,PA5,PA6,PA7,PA8,PB0,PB1,PB6,PB7,PB8,PB12,PB13,PB14,PB15 };
 template<class T,class L,class H> T constrain(T x,L l,H h){return x<l?l:(x>h?h:x);}
-unsigned long millis(); unsigned long micros();
-void delay(unsigned long); void pinMode(int,int);
+unsigned long millis(); void delay(unsigned long); void pinMode(int,int);
 void digitalWrite(int,int); void analogWrite(int,int);
 
 // Everything the firmware sends - ASCII lines and binary frames alike - lands

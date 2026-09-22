@@ -25,29 +25,9 @@ import math
 
 import numpy as np
 
-def _measured(path=None):
-    """Arena dimensions MEASURED from the mat, if they have been.
-
-    calibrationmat.py --build writes arena_cal.json from the accumulated laps.
-    The rulebook figures below are the fallback, not the truth: a mat can be
-    built a few tens of mm off, and a wrong corridor width biases every
-    map-based pose. Measuring beat assuming here - this mat came out
-    2990 / 1090 / 950 against the rulebook's 3000 / 1000 / 1000.
-    """
-    import json
-    import os
-    p = path or os.path.join(os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__))), "arena_cal.json")
-    try:
-        with open(p, "r", encoding="utf-8") as f:
-            c = json.load(f)
-        return float(c["outer_mm"]), float(c["corridor_mm"])
-    except Exception:                                   # noqa: BLE001
-        return 3000.0, 1000.0                           # rulebook default
-
-
-OUTER, CORRIDOR = _measured()   # racetrack inner size, distance between borders
-INNER = OUTER - 2 * CORRIDOR    # internal block (falls out of the other two)
+OUTER = 3000.0                  # racetrack inner size
+CORRIDOR = 1000.0               # distance between borders
+INNER = OUTER - 2 * CORRIDOR    # internal block, 1000 mm
 MID = (OUTER + INNER) / 4.0     # mid-corridor square half-size, 1000 mm
 WALL_H = 100.0
 PILLAR = 50.0

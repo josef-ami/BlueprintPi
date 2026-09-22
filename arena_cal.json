@@ -1,8 +1,0 @@
-{
-  "outer_mm": 2990.0,
-  "inner_mm": 1090.0,
-  "corridor_mm": 950.0,
-  "laps": 12,
-  "source": "calibrationmat.py --build",
-  "identity_residual_mm": 0.0
-}
