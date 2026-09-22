@@ -1,6 +1,6 @@
 [Unit]
-Description=Blueprint obstacle-round dashboard (run, tune and calibrate)
-# One process may hold the camera and the lidar at a time
+Description=Perception calibration dashboard
+# Don't fight main.py for the camera/lidar if that's also a systemd service
 Conflicts=robot.service
 After=network.target
 

@@ -1,666 +1,1428 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Blueprint - obstacle round</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BluePrint Pi dashboard</title>
 <style>
-:root{
-  --bg:#0e1116; --panel:#161b22; --panel2:#1c222b; --rule:#2a313c;
-  --fg:#e6edf3; --dim:#8b949e; --acc:#2f81f7; --ok:#3fb950; --warn:#d29922;
-  --bad:#f85149; --red:#f85149; --green:#3fb950;
-}
-*{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--fg);
-  font:14px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}
-.num{font-family:ui-monospace,Menlo,Consolas,monospace;font-variant-numeric:tabular-nums}
-header{display:flex;align-items:center;gap:14px;padding:8px 14px;
-  background:var(--panel);border-bottom:1px solid var(--rule);
-  position:sticky;top:0;z-index:20;flex-wrap:wrap}
-header h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.01em}
-.tabbar{display:flex;gap:3px}
-.tabbar button{background:transparent;border:1px solid transparent;color:var(--dim);
-  border-radius:6px;padding:5px 14px;cursor:pointer;font-size:14px}
-.tabbar button:hover{background:var(--panel2);color:var(--fg)}
-.tabbar button[aria-selected="true"]{background:var(--acc);color:#fff;font-weight:600}
-.pill{font-size:12px;padding:2px 9px;border-radius:999px;border:1px solid var(--rule);
-  color:var(--dim);white-space:nowrap}
-.pill.ok{color:var(--ok);border-color:#1f6f32}
-.pill.bad{color:var(--bad);border-color:#7d2621}
-.pill.warn{color:var(--warn);border-color:#7a5a12}
-.spacer{flex:1}
-main{padding:12px}
-.row{display:flex;gap:12px;flex-wrap:wrap;align-items:flex-start}
-.col{display:flex;flex-direction:column;gap:12px;min-width:320px;flex:1 1 360px}
-section{background:var(--panel);border:1px solid var(--rule);border-radius:9px;
-  padding:10px 12px 12px}
-section>h2{font-size:12px;text-transform:uppercase;letter-spacing:.08em;
-  color:var(--acc);margin:0 0 8px;font-weight:600}
-img.feed{width:100%;max-width:854px;border:1px solid var(--rule);border-radius:6px;
-  background:#000;display:block}
-img.cal{width:100%;max-width:640px;border:1px solid var(--rule);border-radius:6px;
-  background:#000;display:block;cursor:crosshair;image-rendering:pixelated}
-button{font-size:13px;padding:7px 13px;border:1px solid var(--rule);border-radius:6px;
-  cursor:pointer;background:var(--panel2);color:var(--fg)}
-button:hover{border-color:var(--acc)}
-button:disabled{opacity:.4;cursor:not-allowed}
-button.primary{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:600}
-button.danger{background:#8c2a24;border-color:#8c2a24;color:#fff;font-weight:600}
-button.big{font-size:17px;padding:11px 26px}
-button.on{outline:2px solid var(--fg)}
-.btns{display:flex;gap:7px;flex-wrap:wrap;align-items:center}
-.state{font-size:25px;font-weight:700;letter-spacing:.01em}
-.sub{color:var(--dim);font-size:13px}
-table{border-collapse:collapse;width:100%;font-size:13px}
-td,th{padding:2px 8px 2px 0;text-align:left;vertical-align:top}
-th{color:var(--dim);font-weight:400}
-td.k{color:var(--dim);width:45%;white-space:nowrap}
-td.v{font-family:ui-monospace,Menlo,Consolas,monospace;font-variant-numeric:tabular-nums}
-pre{background:#0a0d12;border:1px solid var(--rule);border-radius:6px;padding:9px;
-  margin:0;height:300px;overflow:auto;font-size:12px;white-space:pre-wrap;
-  font-family:ui-monospace,Menlo,Consolas,monospace}
-.alert{padding:8px 11px;border-radius:6px;margin-bottom:9px;font-size:13px}
-.alert.bad{background:#3d1512;border:1px solid #7d2621;color:#ffb3ae}
-.alert.warn{background:#3a2d0c;border:1px solid #7a5a12;color:#f0cd7a}
-.alert.ok{background:#12341c;border:1px solid #1f6f32;color:#87e39b}
-.dim{color:var(--dim)} .ok{color:var(--ok)} .bad{color:var(--bad)} .warn{color:var(--warn)}
-/* tune */
-fieldset{border:1px solid var(--rule);border-radius:8px;margin:0 0 11px;
-  padding:7px 11px 11px;background:var(--panel2);min-width:290px;flex:1 1 330px}
-legend{color:var(--acc);font-weight:600;padding:0 6px;text-transform:uppercase;
-  font-size:11px;letter-spacing:.08em}
-.p{display:grid;grid-template-columns:1fr 94px;gap:5px 8px;align-items:center;margin:3px 0}
-.p label{font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.p input[type=number]{width:100%;background:#0a0d12;color:var(--fg);
-  border:1px solid var(--rule);border-radius:4px;padding:4px 6px;font-size:12.5px;
-  font-family:ui-monospace,Menlo,Consolas,monospace;font-variant-numeric:tabular-nums}
-.p input[type=checkbox]{width:19px;height:19px;justify-self:start}
-.p input.dirty{border-color:var(--warn);color:var(--warn)}
-.p .u{grid-column:1/3;font-size:11px;color:var(--dim);margin:-2px 0 3px;line-height:1.35}
-.bar{position:sticky;top:45px;background:var(--bg);padding:8px 0;z-index:10;
-  border-bottom:1px solid var(--rule);margin-bottom:11px;display:flex;gap:8px;
-  align-items:center;flex-wrap:wrap}
-input[type=number].sm{width:74px;background:#0a0d12;color:var(--fg);
-  border:1px solid var(--rule);border-radius:4px;padding:4px 6px;font-size:13px}
-.tracks td{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px}
-.hint{font-size:12px;color:var(--dim);margin:5px 0 8px;line-height:1.5}
-.swatch{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px}
-.lane{position:relative;height:38px;background:#0a0d12;border:1px solid var(--rule);
-  border-radius:5px;margin:7px 0;overflow:hidden}
-.lane i{position:absolute;top:0;bottom:0;width:2px}
-.lane .centre{left:50%;background:#39414d}
-.lane .limit{background:#5a4a1a}
-.lane .car{background:var(--acc);width:3px}
-.lane .tgt{background:var(--ok);width:2px}
-.lane b{position:absolute;top:2px;font-size:10px;color:var(--dim);transform:translateX(-50%)}
+  :root{
+    --mat:#FCFCFA; --navy:#0D1B3E; --navy-soft:#2A3A63; --rule:#D8D8D2;
+    --orange:#EF6C1A; --blue:#1B3FD8; --red:#EE2737; --green:#44D62C;
+    --magenta:#FF00FF; --ink:#14161C; --muted:#6A6E78;
+  }
+  *{box-sizing:border-box} html,body{margin:0;padding:0}
+  body{background:var(--mat);color:var(--ink);
+       font-family:system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;
+       font-size:15px;line-height:1.5}
+  .num{font-family:ui-monospace,Menlo,Consolas,monospace;font-variant-numeric:tabular-nums}
+
+  header{background:var(--navy);color:#fff;display:flex;align-items:center;
+         gap:20px;padding:12px 20px}
+  header h1{font-size:16px;font-weight:600;margin:0}
+  .pills{display:flex;gap:8px;margin-left:auto;align-items:center}
+  .pill{display:inline-flex;align-items:center;gap:7px;background:var(--navy-soft);
+        border-radius:999px;padding:4px 12px;font-size:13px}
+  .dot{width:8px;height:8px;border-radius:50%;background:#888}
+  .dot.on{background:var(--green)} .dot.off{background:var(--red)}
+
+  button{font:inherit;border:1px solid var(--navy);background:#fff;color:var(--navy);
+         border-radius:4px;padding:6px 14px;cursor:pointer}
+  button:hover{background:#F0F1F5}
+  button:focus-visible{outline:3px solid var(--orange);outline-offset:2px}
+  .save{background:var(--orange);border-color:var(--orange);color:#fff;font-weight:600}
+  .save:hover{background:#D75E12} .save[disabled]{opacity:.5;cursor:default}
+
+  main{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(340px,1fr)}
+  .col-video{border-right:1px solid var(--rule);min-width:0}
+  section{padding:18px 20px;border-bottom:1px solid var(--rule)}
+  section h2{font-size:13px;font-weight:600;color:var(--muted);margin:0 0 12px}
+
+  .tabs{display:flex;gap:2px;margin-bottom:12px;flex-wrap:wrap}
+  .tabs button{border-radius:0;border-color:var(--rule);color:var(--muted)}
+  .tabs button[aria-pressed="true"]{background:var(--navy);border-color:var(--navy);
+        color:#fff;font-weight:600}
+  #feed{width:100%;display:block;background:#000;border:1px solid var(--navy);
+        aspect-ratio:4/3;object-fit:contain}
+  .feedwrap{position:relative}
+  .feedwrap.picking #feed{cursor:crosshair}
+  .pick-marker{position:absolute;width:18px;height:18px;margin:-9px 0 0 -9px;
+        border:2px solid #fff;border-radius:50%;box-shadow:0 0 0 1px #0008,0 0 6px #0009;
+        pointer-events:none;opacity:0;transition:opacity .25s linear}
+  .pick-marker.show{opacity:1}
+  #pick[aria-pressed="true"]{background:var(--orange);border-color:var(--orange);color:#fff}
+  .samps{display:flex;flex-wrap:wrap;gap:4px}
+  .samp{width:22px;height:22px;padding:0;border:1px solid var(--rule);border-radius:4px;cursor:pointer}
+  .samp:hover{outline:2px solid var(--red);outline-offset:1px}
+  .hint{color:var(--muted);font-size:13px;margin:10px 0 0}
+
+  .swatches{display:flex;gap:6px;margin-bottom:14px}
+  .sw{flex:1;border:2px solid var(--rule);background:#fff;border-radius:4px;
+      padding:7px 4px;cursor:pointer;font-size:13px;font-weight:600}
+  .sw[aria-pressed="true"]{color:#fff}
+  .sw[data-c="RED"][aria-pressed="true"]{background:var(--red);border-color:var(--red)}
+  .sw[data-c="GREEN"][aria-pressed="true"]{background:var(--green);border-color:var(--green);color:#14161C}
+  .sw[data-c="MAGENTA"][aria-pressed="true"]{background:var(--magenta);border-color:var(--magenta)}
+
+  .rng{margin-bottom:9px}
+  .rng label{display:flex;justify-content:space-between;font-size:13px;
+             color:var(--muted);margin-bottom:2px}
+  .rng label b{color:var(--ink);font-weight:600}
+  input[type=range]{width:100%;accent-color:var(--blue);margin:0}
+  .band{border-left:3px solid var(--blue);padding-left:12px;margin-bottom:16px}
+  .band .cap{font-size:12px;color:var(--muted);margin-bottom:8px}
+  .lidar-band{border-left:3px solid var(--orange);padding-left:12px}
+  .switch{display:flex;align-items:center;gap:8px;font-size:14px}
+  .row{display:flex;gap:10px;align-items:center;justify-content:space-between}
+
+  .diag{padding:18px 20px}
+  .diag h2{font-size:13px;font-weight:600;color:var(--muted);margin:0 0 14px}
+  .diag-top{display:grid;grid-template-columns:auto minmax(0,1fr);gap:20px;margin-bottom:20px}
+  #radar,#radarRaw{border:1px solid var(--navy);background:#fff;display:block}
+  .radars{display:flex;gap:18px;flex-wrap:wrap}
+
+  .win{border:1px solid var(--rule);border-radius:6px;padding:12px 14px;margin-bottom:12px}
+  .win-head{display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap}
+  .win-head .name{font-weight:600}
+  .chip{display:inline-block;width:10px;height:10px;border-radius:2px}
+  .verdict{font-size:12px;font-weight:600;padding:2px 8px;border-radius:999px}
+  .v-ok{background:#E3F6E0;color:#1c7a2e}
+  .v-far_only{background:#fde2e2;color:#b1201f}
+  .v-all_floored{background:#fff0d9;color:#a15b0e}
+  .v-empty{background:#eceef2;color:#6A6E78}
+  canvas.strip{width:100%;height:66px;display:block;margin-top:4px}
+  .legend{display:flex;gap:16px;font-size:12px;color:var(--muted);margin:2px 0 16px;flex-wrap:wrap}
+  .legend span{display:inline-flex;align-items:center;gap:5px}
+  .legend i{width:10px;height:10px;border-radius:2px;display:inline-block}
+  .empty{color:var(--muted);font-style:italic}
+  .bearings{display:flex;align-items:flex-end;gap:24px;flex-wrap:wrap;margin-bottom:18px}
+  .brow{display:flex;gap:22px;align-items:center}
+  .bcell{display:flex;flex-direction:column;gap:2px}
+  .bcell .btag{font-size:12px;color:var(--muted)}
+  .bcell .bval{font-size:15px}
+  .bcell .bval.miss{color:var(--muted);font-style:italic}
+  @media (max-width:900px){main{grid-template-columns:1fr}.col-video{border-right:none}.diag-top{grid-template-columns:1fr}}
+
+  /* ---------------- tabs ---------------- */
+  [hidden]{display:none!important}
+  header{height:52px;padding-top:0;padding-bottom:0}
+  .tabbar{display:flex;gap:4px}
+  .tabbar button{background:transparent;border:1px solid transparent;color:#b9c4e2;border-radius:4px;padding:5px 12px}
+  .tabbar button:hover{background:var(--navy-soft)}
+  .tabbar button[aria-selected="true"]{background:#fff;color:var(--navy);font-weight:600}
+
+  /* ---------------- obstacle run tab ---------------- */
+  #tab-run{height:calc(100vh - 52px);display:grid;overflow:hidden;
+           grid-template-columns:minmax(560px,700px) minmax(520px,1fr) minmax(470px,560px);font-size:13px;line-height:1.4}
+  .rcol{display:flex;flex-direction:column;min-height:0;min-width:0;border-right:1px solid var(--rule)}
+  .rcol.last{border-right:none}
+  .rcard{padding:8px 12px;border-bottom:1px solid var(--rule);min-width:0}
+  .rcard.grow{flex:1 1 auto;min-height:0;display:flex;flex-direction:column}
+  .scroll{overflow:auto;min-height:0}
+  .rh{display:flex;align-items:baseline;gap:10px;margin-bottom:6px}
+  .rh h2{font-size:12px;font-weight:600;color:var(--muted);margin:0;text-transform:uppercase;letter-spacing:.04em;white-space:nowrap}
+  .rmeta{margin-left:auto;color:var(--muted);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #run-feed{width:100%;display:block;background:#111;border:1px solid var(--navy);aspect-ratio:854/480;object-fit:contain}
+  .lid-top{display:flex;gap:10px;align-items:flex-start}
+  .lid-top canvas{border:1px solid var(--navy);background:#fff;display:block}
+  .cap{font-size:11px;color:var(--muted);margin:0 0 3px}
+  .lid-side{flex:1;min-width:0;font-size:12px}
+  .kv{display:flex;justify-content:space-between;gap:8px;padding:1px 0;border-bottom:1px dotted #e6e6e0}
+  .kv span{color:var(--muted);white-space:nowrap}
+  .kv b{font-weight:600;font-family:ui-monospace,Menlo,Consolas,monospace;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .subcap{font-size:11px;color:var(--muted);margin:6px 0 1px;font-weight:600}
+  #tab-run .legend{margin:6px 0 4px;gap:12px;font-size:11px}
+  #run-windows{flex:1 1 auto}
+  #run-windows .win{padding:6px 10px;margin-bottom:6px}
+  #run-windows .win-head{margin-bottom:4px;gap:8px;font-size:12px}
+  #run-windows canvas.strip{height:54px}
+  .tag-target{font-size:11px;font-weight:700;color:#fff;background:var(--orange);border-radius:3px;padding:1px 6px}
+
+  /* FSM diagram */
+  #fsm-svg{width:100%;max-height:228px;display:block}
+  #fsm-svg .node rect{fill:#fff;stroke:#9aa3b8;stroke-width:1.2}
+  #fsm-svg .node text{font:600 12px system-ui,sans-serif;fill:var(--ink);text-anchor:middle}
+  #fsm-svg .node .sub{font:500 10px ui-monospace,Menlo,monospace;fill:var(--muted)}
+  #fsm-svg .node.cur rect{fill:var(--navy);stroke:var(--navy);stroke-width:2}
+  #fsm-svg .node.cur text{fill:#fff}
+  #fsm-svg .node.cur .sub{fill:#cfd8f3}
+  #fsm-svg .node.cur.stale rect{fill:#6a7390;stroke:#6a7390}
+  #fsm-svg .node.overlay rect{stroke-dasharray:4 3}
+  #fsm-svg .edge{fill:none;stroke:#b3b8c4;stroke-width:1.4;marker-end:url(#ah)}
+  #fsm-svg .edge.both{marker-start:url(#ahs);stroke-dasharray:4 3}
+  #fsm-svg .edge.hot{stroke:var(--orange);stroke-width:2.6;marker-end:url(#ah-hot)}
+  #fsm-svg .edge.both.hot{marker-start:url(#ahs-hot)}
+  #fsm-svg .el{font:10px system-ui,sans-serif;fill:#6A6E78}
+  #fsm-svg .el.bg{stroke:#FCFCFA;stroke-width:4;paint-order:stroke}
+  .hist{font-size:11.5px;color:var(--muted);min-height:17px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .hist b{color:var(--ink);font-weight:600}
+
+  /* "now" descriptions */
+  .now-title{display:flex;align-items:baseline;gap:10px;margin:0 0 4px}
+  .now-title .st{font-size:17px;font-weight:700;color:var(--navy)}
+  .now-title .ph{font-size:13px;font-weight:600;color:var(--orange)}
+  .now-title .tm{margin-left:auto;font-size:12px;color:var(--muted)}
+  .lead{margin:0 0 6px;font-size:13px}
+  .nrow{display:grid;grid-template-columns:16px minmax(120px,190px) 1fr auto;gap:6px;align-items:center;padding:2px 0;border-bottom:1px dotted #e6e6e0;font-size:12.5px}
+  .nrow .nk{font-size:11px;text-align:center}
+  .nrow .nl{color:var(--muted)}
+  .nrow .nv{min-width:0}
+  .nrow .nt{font-size:10.5px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;border-radius:3px;padding:0 5px}
+  .k-fire .nk,.k-fire .nt{color:#b1400b} .k-fire .nt{background:#fde7d8}
+  .k-block .nk,.k-block .nt{color:#b1201f} .k-block .nt{background:#fde2e2}
+  .k-wait .nk,.k-wait .nt{color:#6A6E78} .k-wait .nt{background:#eceef2}
+  .k-ok .nk,.k-ok .nt{color:#1c7a2e} .k-ok .nt{background:#E3F6E0}
+  .k-warn .nk,.k-warn .nt{color:#a15b0e} .k-warn .nt{background:#fff0d9}
+  .k-info .nk{color:#9aa0aa}
+  .nbar{display:inline-block;width:90px;height:7px;background:#eceef2;border-radius:4px;vertical-align:middle;margin-left:6px;overflow:hidden}
+  .nbar i{display:block;height:100%;background:var(--navy-soft);border-radius:4px}
+  .nsec{font-size:11px;font-weight:600;color:var(--muted);margin:7px 0 1px;text-transform:uppercase;letter-spacing:.04em}
+  .note{font-size:11.5px;color:var(--muted);margin:6px 0 0}
+  .alert{border-radius:4px;padding:5px 8px;margin:0 0 6px;font-size:12.5px}
+  .alert.warn{background:#fff0d9;color:#7a4508} .alert.err{background:#fde2e2;color:#8a1716} .alert.info{background:#eef1f8;color:var(--navy)}
+
+  /* supervisor chain */
+  .chain{display:flex;align-items:center;gap:4px;flex-wrap:wrap;margin-bottom:6px}
+  .chain .cn{border:1.2px solid #9aa3b8;border-radius:5px;padding:2px 8px;font-size:11.5px;font-weight:600;background:#fff}
+  .chain .cn.cur{background:var(--navy);border-color:var(--navy);color:#fff}
+  .chain .ar{color:#9aa3b8;font-size:12px}
+  .chain .cn.badge{border-style:dashed;margin-left:6px}
+
+  /* controls + fields */
+  .ctl-row{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+  .ctl-row button{padding:5px 11px}
+  .ctl-row button[disabled]{opacity:.4;cursor:default}
+  button.primary{background:var(--navy);color:#fff;font-weight:600}
+  button.primary:hover{background:#1b2b57}
+  button.danger{background:var(--red);border-color:var(--red);color:#fff;font-weight:700}
+  button.danger:hover{background:#c91f2d}
+  button.ghost{border-style:dashed}
+  button.confirm{background:var(--orange);border-color:var(--orange);color:#fff}
+  button.mini{padding:1px 8px;font-size:11.5px}
+  .opts{margin-top:6px;font-size:12.5px;gap:14px}
+  .opts input[type=text],.opts input:not([type]){font:inherit;font-size:12px;padding:2px 6px;border:1px solid var(--rule);border-radius:3px;width:170px}
+  .speed-row{margin-top:8px;font-size:12.5px;gap:10px}
+  .speed-row label{white-space:nowrap}
+  .speed-row input[type=range]{flex:1;min-width:120px}
+  .speed-row input[type=range][disabled]{opacity:.4;cursor:default}
+  .ctl-msg{margin-top:6px;font-size:12.5px;min-height:18px}
+  .banner{margin-top:4px;font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .fields{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:3px 8px}
+  .f{min-width:0}
+  .f .fl{font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.03em;white-space:nowrap}
+  .f .fv{font-family:ui-monospace,Menlo,Consolas,monospace;font-variant-numeric:tabular-nums;font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .f.w2{grid-column:span 2} .f.w3{grid-column:span 3} .f.w6{grid-column:span 6}
+  .f .fv.miss{color:var(--muted);font-weight:400}
+  .chips{display:flex;flex-wrap:wrap;gap:4px;margin-top:5px}
+  .chips span{font-size:10.5px;font-weight:600;border-radius:3px;padding:1px 6px;border:1px solid var(--rule);color:var(--muted)}
+  .chips span.on{border-color:var(--navy-soft);color:var(--navy);background:#eef1f8}
+  .chips span.bad{border-color:#f3b4b4;color:#b1201f;background:#fde2e2}
+  .console-card .rh{margin-bottom:4px}
+  .cons-opt{font-size:11.5px;color:var(--muted);display:flex;align-items:center;gap:4px}
+  #console{flex:1 1 auto;min-height:0;margin:0;overflow:auto;background:#101522;color:#d7dcea;border-radius:4px;padding:6px 8px;font-size:11.5px;line-height:1.45;white-space:pre-wrap;overflow-wrap:anywhere}
+  #console>div{padding-left:11ch;text-indent:-11ch}
+  #console .ts{color:#6f7891}
+  #console .c-fw{color:#9fd0ff} #console .c-avoid{color:#ffb77d} #console .c-state{color:#c5a8ff}
+  #console .c-lap{color:#ffffff;font-weight:600} #console .c-err{color:#ff8e8e;font-weight:600}
+  #console .c-reboot{color:#ffd166} #console .c-status{color:#8d96ad}
+  #console.hide-status .c-status{display:none}
 </style>
 </head>
 <body>
 
 <header>
-  <h1>Blueprint · obstacle round</h1>
+  <h1>BluePrint Pi</h1>
   <nav class="tabbar" role="tablist">
-    <button role="tab" data-tab="run" aria-selected="true">Run</button>
-    <button role="tab" data-tab="tune" aria-selected="false">Tune</button>
-    <button role="tab" data-tab="cal" aria-selected="false">Calibrate</button>
+    <button role="tab" data-tab="cal" aria-selected="true">Calibration</button>
+    <button role="tab" data-tab="run" aria-selected="false">Obstacle run</button>
   </nav>
-  <div class="spacer"></div>
-  <span class="pill" id="p-cam">camera</span>
-  <span class="pill" id="p-lidar">lidar</span>
-  <span class="pill" id="p-stm">STM32</span>
-  <span class="pill" id="p-sess">no session</span>
+  <div class="pills" id="pills-run" hidden>
+    <span class="pill"><span class="dot" id="r-cam"></span><span id="r-cam-t">Camera</span></span>
+    <span class="pill"><span class="dot" id="r-lidar"></span><span id="r-lidar-t">Lidar</span></span>
+    <span class="pill"><span class="dot" id="r-link"></span><span id="r-link-t">STM32 link</span></span>
+    <span class="pill"><span class="dot" id="r-sess"></span><span id="r-sess-t">No session</span></span>
+  </div>
+  <div class="pills" id="pills-cal">
+    <span class="pill"><span class="dot" id="d-cam"></span>Camera</span>
+    <span class="pill"><span class="dot" id="d-lidar"></span>Lidar</span>
+    <span class="pill"><span class="dot" id="d-stream"></span>STM32 stream</span>
+    <button id="stream-toggle">Start streaming</button>
+    <button class="save" id="save">Save to config.json</button>
+  </div>
 </header>
 
+<div id="tab-cal">
 <main>
-
-<!-- ============================ RUN ============================ -->
-<div id="tab-run">
-  <div id="run-alerts"></div>
-  <div class="row">
-
-    <div class="col" style="flex:2 1 620px">
-      <section>
-        <h2>Camera · what the detector accepts</h2>
-        <img class="feed" id="run-feed" src="">
-        <div class="hint">
-          <span class="swatch" style="background:#f85149"></span>red
-          <span class="swatch" style="background:#3fb950"></span>green
-          &nbsp;·&nbsp; dashed grey = rejected:
-          <b>A</b> too flat · <b>S</b> ragged · <b>F</b> not on the mat ·
-          <b>L</b> mat not linked to the floor in front · <b>C</b> too little colour
-        </div>
-      </section>
-
-      <section>
-        <h2>Console</h2>
-        <pre id="log"></pre>
-      </section>
-    </div>
-
-    <div class="col">
-      <section>
-        <h2>Car</h2>
-        <div class="state" id="state">—</div>
-        <div class="sub" id="substate"></div>
-        <div class="btns" style="margin:10px 0">
-          <button class="big primary" id="b-go" onclick="post('/api/car/start')">START</button>
-          <button class="big danger" id="b-stop" onclick="post('/api/car/stop')">STOP</button>
-        </div>
-        <div class="btns">
-          <button id="b-open" onclick="post('/api/run/start')">Open session</button>
-          <button id="b-dry" onclick="post('/api/run/start',{dry:true})">Open dry</button>
-          <button id="b-end" onclick="post('/api/run/end')">End session</button>
-          <button id="b-reboot" onclick="confirmReboot()">Reboot STM32</button>
-        </div>
-        <div id="reboot" class="hint"></div>
-      </section>
-
-      <section>
-        <h2>Lane</h2>
-        <div class="lane" id="lane"></div>
-        <table id="t-lane"></table>
-      </section>
-
-      <section>
-        <h2>Pillar tracks</h2>
-        <table class="tracks" id="t-tracks"></table>
-      </section>
-
-      <section>
-        <h2>Perception</h2>
-        <table id="t-percept"></table>
-      </section>
-
-      <section>
-        <h2>STM32 · telemetry</h2>
-        <table id="t-telem"></table>
-      </section>
-
-      <section>
-        <h2>Loop</h2>
-        <table id="t-loop"></table>
-      </section>
-    </div>
+  <div class="col-video">
+    <section style="border-bottom:none">
+      <div class="tabs" role="group">
+        <button data-v="blobs"   aria-pressed="true">Colour detections</button>
+        <button data-v="mask"    aria-pressed="false">Mask</button>
+        <button data-v="overlay" aria-pressed="false">Overlay</button>
+        <button data-v="raw"     aria-pressed="false">Raw</button>
+        <button data-v="floor"   aria-pressed="false">Floor filter</button>
+      </div>
+      <div class="feedwrap" id="feedwrap">
+        <img id="feed" alt="Camera feed">
+        <div class="pick-marker" id="pick-marker"></div>
+      </div>
+      <p class="hint" id="feedhint"></p>
+    </section>
   </div>
-</div>
 
-<!-- ============================ TUNE ============================ -->
-<div id="tab-tune" hidden>
-  <div class="bar">
-    <button class="primary" onclick="save()">Save to config.json</button>
-    <button onclick="revert('pi')">Revert Pi</button>
-    <button onclick="revert('stm32')">Revert STM32</button>
-    <button onclick="loadParams(true)">Reload</button>
-    <span id="tune-msg" class="dim"></span>
-    <span class="spacer"></span>
-    <span class="pill" id="p-derived"></span>
+  <div>
+    <section>
+      <h2>Colour (camera)</h2>
+      <div class="swatches" role="group">
+        <button class="sw" data-c="RED" aria-pressed="true">Red</button>
+        <button class="sw" data-c="GREEN" aria-pressed="false">Green</button>
+        <button class="sw" data-c="MAGENTA" aria-pressed="false">Magenta</button>
+      </div>
+      <div class="row" style="margin-bottom:6px;justify-content:flex-start">
+        <button id="pick" aria-pressed="false">Pick from feed</button>
+        <button id="pick-undo" disabled>Undo last</button>
+        <button id="pick-clear" disabled>Clear</button>
+      </div>
+      <div class="samps" id="pick-samples"></div>
+      <div class="hint num" id="pick-count" style="margin:2px 0 0">No samples yet</div>
+      <span class="hint" id="pick-hint" style="display:block;margin:4px 0 0">Arm, then click the same obstacle from several spots — the mask widens to cover every sample.</span>
+      <div id="bands" style="margin-top:12px"></div>
+      <div class="rng">
+        <label for="hfov">Horizontal field of view <b><span id="hfov-v" class="num"></span>°</b></label>
+        <input type="range" id="hfov" min="20" max="180" step="0.5">
+      </div>
+      <div class="rng">
+        <label for="area">Minimum blob area <b><span id="area-v" class="num"></span> px</b></label>
+        <input type="range" id="area" min="0" max="5000" step="25">
+      </div>
+      <label class="switch" style="margin-top:8px">
+        <input type="checkbox" id="swap"> Swap red and blue channels
+      </label>
+    </section>
+
+    <section>
+      <h2>Floor / pillar filter</h2>
+      <label class="switch"><input type="checkbox" id="fl-en"> Only keep red/green that stands on the white mat</label>
+      <label class="switch" style="margin:4px 0 10px"><input type="checkbox" id="fl-link"> …and whose floor reaches the car with no wall between</label>
+      <div class="lidar-band" id="floorBands"></div>
+      <p class="hint" style="margin-top:4px">Tune on the <b>Floor filter</b> view: blue = white mat linked to the floor in front of the car, purple = white but cut off by a wall, each blob's contact strip green (pass) or red (fail).</p>
+    </section>
+
+    <section>
+      <h2>Distance selection (fusion)</h2>
+      <div class="lidar-band" id="fusionBands"></div>
+    </section>
+
+    <section>
+      <div class="row">
+        <button id="revert">Revert to saved</button>
+        <span class="hint" style="margin:0">Save, then restart main.py to apply.</span>
+      </div>
+    </section>
   </div>
-  <div id="tune-pi"></div>
-  <h2 style="font-size:12px;text-transform:uppercase;letter-spacing:.08em;
-             color:var(--acc);margin:20px 0 8px">
-    STM32 <span id="stm-state" class="dim" style="text-transform:none;
-      letter-spacing:0;font-weight:400"></span></h2>
-  <div id="tune-stm"></div>
-</div>
-
-<!-- ========================== CALIBRATE ========================== -->
-<div id="tab-cal" hidden>
-  <div class="row">
-    <div class="col" style="flex:1 1 640px">
-      <section>
-        <h2>Click the mat and the pillars</h2>
-        <img class="cal" id="cal-feed" src="">
-        <div class="hint">Crosses mark your samples: white = mat, red = red
-          pillar, green = green pillar. 8–15 clicks per class, spread across
-          the frame — near and far, lit and shaded, both faces of each pillar.</div>
-        <div class="btns">
-          <span class="dim">sampling</span>
-          <button id="c-mat" class="on" onclick="pick('mat')">Mat</button>
-          <button id="c-red" onclick="pick('red')">Red pillar</button>
-          <button id="c-green" onclick="pick('green')">Green pillar</button>
-          <button onclick="calPost('/api/cal/undo')">Undo</button>
-          <button onclick="calPost('/api/cal/clear')">Clear class</button>
-        </div>
-        <div class="btns" style="margin-top:7px">
-          <span class="dim">view</span>
-          <button onclick="calView('camera')">camera</button>
-          <button onclick="calView('red')">red mask</button>
-          <button onclick="calView('green')">green mask</button>
-          <button onclick="calView('mat')">mat mask</button>
-          <button onclick="calView('linked')">linked floor</button>
-          <button onclick="calView('a')">a channel</button>
-          <button onclick="calView('chroma')">chroma</button>
-        </div>
-        <div class="btns" style="margin-top:11px">
-          <button class="primary big" onclick="dofit()">FIT</button>
-          <button class="big" onclick="save()">SAVE to config.json</button>
-        </div>
-        <div id="cal-msg" class="hint"></div>
-      </section>
-    </div>
-
-    <div class="col">
-      <section>
-        <h2>Samples</h2>
-        <table id="cal-stats"></table>
-      </section>
-      <section>
-        <h2>Fit</h2>
-        <div class="btns">
-          <span class="dim">margin</span>
-          <input type="number" class="sm" id="f-margin" value="10" min="0" max="40"
-                 onchange="setfit()">
-          <span class="dim">mat gap</span>
-          <input type="number" class="sm" id="f-sep" value="6" min="0" max="40"
-                 onchange="setfit()">
-          <span class="dim">percentile</span>
-          <input type="number" class="sm" id="f-pct" value="5" min="0" max="25"
-                 onchange="setfit()">
-        </div>
-        <div class="hint">margin widens each range; mat gap forces the pillar
-          ranges clear of the mat on the <b>a</b> channel; percentile trims
-          outliers. Only <b>a</b> classifies — L and b are kept loose on
-          purpose, because a tight L fitted under one light is what makes a
-          calibration stop working when the room changes.</div>
-      </section>
-      <section>
-        <h2>Detector <span id="cal-space" class="dim"
-            style="font-size:12px;text-transform:none;letter-spacing:0"></span></h2>
-        <table id="cal-det"></table>
-      </section>
-      <section>
-        <h2>AREA_K</h2>
-        <div class="hint">The fallback distance when no LiDAR return agrees
-          with the camera ray. Put a pillar at a measured distance, type it,
-          then click that pillar with Red or Green selected.</div>
-        <div class="btns">
-          <span class="dim">true distance</span>
-          <input type="number" class="sm" id="c-dist" value="600" min="100"
-                 max="3000" onchange="setdist()"> <span class="dim">mm</span>
-        </div>
-        <div id="cal-areak" class="hint"></div>
-      </section>
-      <section>
-        <h2>Fitted values</h2>
-        <table id="cal-vals"></table>
-      </section>
-    </div>
-  </div>
-</div>
-
 </main>
 
+<div class="diag">
+  <h2>Fusion diagnostics &nbsp;·&nbsp; front <span class="num" id="front">—</span> &nbsp;·&nbsp; <span id="lidarstats" class="num" style="color:var(--muted)">—</span></h2>
+
+  <div class="bearings">
+    <div class="rng" style="max-width:260px;margin:0">
+      <label for="btol">Bearing tolerance <b>±<span id="btol-v" class="num">2</span>°</b></label>
+      <input type="range" id="btol" min="0" max="20" step="1" value="2">
+    </div>
+    <div class="brow">
+      <div class="bcell"><span class="btag">0° (fwd)</span><span class="num bval miss" id="b-deg0">—</span></div>
+      <div class="bcell"><span class="btag">90° (left)</span><span class="num bval miss" id="b-deg90">—</span></div>
+      <div class="bcell"><span class="btag">270° (right)</span><span class="num bval miss" id="b-deg270">—</span></div>
+    </div>
+  </div>
+
+  <div class="bearings" id="streamRow">
+    <div class="brow">
+      <div class="bcell"><span class="btag">Front</span><span class="num bval miss" id="s-f">—</span></div>
+      <div class="bcell"><span class="btag">Left</span><span class="num bval miss" id="s-l">—</span></div>
+      <div class="bcell"><span class="btag">Right</span><span class="num bval miss" id="s-r">—</span></div>
+      <div class="bcell"><span class="btag">rev/s</span><span class="num bval" id="s-revs">—</span></div>
+      <div class="bcell"><span class="btag">queue</span><span class="num bval" id="s-queue">—</span></div>
+    </div>
+    <span class="hint" id="stream-hint" style="margin:0">Stopped. Streams left/front/right to the STM32 over /dev/ttyACM0 at ±<span id="stream-tol">2</span>° (the tolerance set above, live — no save needed).</span>
+  </div>
+
+  <div class="diag-top">
+    <div class="radars">
+      <div>
+        <div class="hint" style="margin:0 0 6px">Raw lidar (quality-coloured)</div>
+        <canvas id="radarRaw" width="300" height="300"></canvas>
+      </div>
+      <div>
+        <div class="hint" style="margin:0 0 6px">Obstacles + windows</div>
+        <canvas id="radar" width="300" height="300"></canvas>
+      </div>
+    </div>
+    <div>
+      <div class="hint" style="margin:0 0 6px">
+        Per-obstacle window inspector — every lidar return inside the bearing window, on a distance axis. This shows exactly why a distance was chosen.
+      </div>
+      <div class="legend">
+        <span><i style="background:#0D1B3E"></i>kept (near cluster)</span>
+        <span><i style="background:#8A8F99"></i>gap-split away (far)</span>
+        <span><i style="background:#EE2737"></i>floored (too near)</span>
+        <span><i style="background:#EF6C1A;border-radius:50%"></i>chosen</span>
+      </div>
+      <div id="windows"></div>
+    </div>
+  </div>
+</div>
+
+</div><!-- /tab-cal -->
+
+<!-- ======================= OBSTACLE RUN TAB ======================= -->
+<div id="tab-run" hidden>
+
+  <!-- column 1: camera + lidar / obstacles / fusion -->
+  <div class="rcol">
+    <section class="rcard">
+      <div class="rh"><h2>Camera · pillars + masks</h2><span class="rmeta num" id="cam-meta">—</span></div>
+      <img id="run-feed" alt="Run camera: pillar detections (left); RED pillars, GREEN pillars and white-floor masks (right)">
+    </section>
+    <section class="rcard grow">
+      <div class="rh"><h2>Lidar · obstacles · fusion</h2><span class="rmeta num" id="lid-meta">—</span></div>
+      <div class="lid-top">
+        <div><div class="cap">Raw lidar (quality-coloured)</div><canvas id="run-radar-raw" width="206" height="206"></canvas></div>
+        <div><div class="cap">Obstacles, windows, picks, solve</div><canvas id="run-radar" width="206" height="206"></canvas></div>
+        <div class="lid-side">
+          <div class="kv"><span>Front (±15° min)</span><b id="rl-front">—</b></div>
+          <div class="kv"><span>Returning</span><b id="rl-valid">—</b></div>
+          <div class="kv"><span>Scan age</span><b id="rl-age">—</b></div>
+          <div class="subcap">Bearing picks ±<span id="rl-tol">2</span>° → sent F / L / R</div>
+          <div class="kv"><span>0° fwd</span><b id="rl-p0">—</b></div>
+          <div class="kv"><span>90° left</span><b id="rl-p90">—</b></div>
+          <div class="kv"><span>270° right</span><b id="rl-p270">—</b></div>
+          <div class="kv"><span>rev/s · queue</span><b id="rl-rev">—</b></div>
+          <div class="subcap">Fusion (<span id="rl-fsrc">config</span>)</div>
+          <div class="kv"><span>win · floor · gap</span><b id="rl-fus">—</b></div>
+        </div>
+      </div>
+      <div class="legend">
+        <span><i style="background:#0D1B3E"></i>kept</span>
+        <span><i style="background:#8A8F99"></i>gap-split away</span>
+        <span><i style="background:#EE2737"></i>floored</span>
+        <span><i style="background:#EF6C1A;border-radius:50%"></i>chosen</span>
+        <span><i style="background:#EF6C1A"></i>F/L/R picks · solved heading (dashed)</span>
+      </div>
+      <div id="run-windows" class="scroll"></div>
+    </section>
+  </div>
+
+  <!-- column 2: the state machines -->
+  <div class="rcol">
+    <section class="rcard">
+      <div class="rh"><h2>STM32 state machine</h2><span class="rmeta num" id="fsm-meta">—</span></div>
+      <svg id="fsm-svg" viewBox="0 0 620 236" role="img" aria-label="STM32 state machine; the current state is filled">
+        <defs>
+          <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0L10,5L0,10z" fill="#b3b8c4"/></marker>
+          <marker id="ahs" viewBox="0 0 10 10" refX="1" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M10,0L0,5L10,10z" fill="#b3b8c4"/></marker>
+          <marker id="ah-hot" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0,0L10,5L0,10z" fill="#EF6C1A"/></marker>
+          <marker id="ahs-hot" viewBox="0 0 10 10" refX="1" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M10,0L0,5L10,10z" fill="#EF6C1A"/></marker>
+        </defs>
+        <path class="edge" id="e-boot-head" d="M104,118 L196,118"/>
+        <text class="el bg" x="150" y="111" text-anchor="middle">GO</text>
+        <text class="el" x="150" y="133" text-anchor="middle">5 s after HELLO</text>
+        <path class="edge" id="e-head-avoid" d="M236,100 L236,56"/>
+        <text class="el" x="230" y="82" text-anchor="end">Pi solved</text>
+        <path class="edge" id="e-avoid-head" d="M258,56 L258,100"/>
+        <text class="el" x="264" y="82">done</text>
+        <path class="edge" id="e-head-turn" d="M236,136 L236,180"/>
+        <text class="el" x="230" y="162" text-anchor="end">side open ×3 revs</text>
+        <path class="edge" id="e-turn-head" d="M258,180 L258,136"/>
+        <text class="el" x="264" y="162">turned</text>
+        <path class="edge" id="e-head-fin" d="M294,108 L396,82"/>
+        <text class="el bg" x="352" y="80" text-anchor="middle">12 corners</text>
+        <path class="edge" id="e-stop" d="M294,128 L396,154"/>
+        <text class="el bg" x="346" y="152" text-anchor="middle">STOP</text>
+        <path class="edge" id="e-fin-boot" d="M446,58 L446,11 L56,11 L56,98"/>
+        <text class="el bg" x="340" y="14" text-anchor="middle">RERUN (0→1 edge)</text>
+        <path class="edge" id="e-stop-boot" d="M446,176 L446,227 L56,227 L56,138"/>
+        <text class="el bg" x="340" y="230" text-anchor="middle">RERUN (0→1 edge)</text>
+        <path class="edge both" id="e-recover" d="M300,118 L514,118"/>
+        <text class="el bg" x="452" y="114" text-anchor="middle">front ≤ 200 mm</text>
+        <text class="el" x="566" y="152" text-anchor="middle">overlay on HEADING,</text>
+        <text class="el" x="566" y="164" text-anchor="middle">AVOID and TURN90;</text>
+        <text class="el" x="566" y="176" text-anchor="middle">returns where it was</text>
+        <g class="node" id="n-BOOT"><rect x="8" y="98" width="96" height="40" rx="6"/><text x="56" y="114">BOOT</text><text class="sub" x="56" y="130" id="s-BOOT"></text></g>
+        <g class="node" id="n-HEADING"><rect x="196" y="98" width="100" height="40" rx="6"/><text x="246" y="114">HEADING</text><text class="sub" x="246" y="130" id="s-HEADING"></text></g>
+        <g class="node" id="n-AVOID"><rect x="196" y="18" width="100" height="40" rx="6"/><text x="246" y="34">AVOID</text><text class="sub" x="246" y="50" id="s-AVOID"></text></g>
+        <g class="node" id="n-TURN90"><rect x="196" y="178" width="100" height="40" rx="6"/><text x="246" y="194">TURN90</text><text class="sub" x="246" y="210" id="s-TURN90"></text></g>
+        <g class="node" id="n-FINISH"><rect x="396" y="58" width="100" height="40" rx="6"/><text x="446" y="74">FINISH</text><text class="sub" x="446" y="90" id="s-FINISH"></text></g>
+        <g class="node" id="n-STOPPED"><rect x="396" y="136" width="100" height="40" rx="6"/><text x="446" y="152">STOPPED</text><text class="sub" x="446" y="168" id="s-STOPPED"></text></g>
+        <g class="node overlay" id="n-RECOVER"><rect x="518" y="98" width="96" height="40" rx="6"/><text x="566" y="114">RECOVER</text><text class="sub" x="566" y="130" id="s-RECOVER"></text></g>
+      </svg>
+      <div class="hist" id="fsm-hist"></div>
+    </section>
+    <section class="rcard grow scroll" id="fsm-now"></section>
+    <section class="rcard" id="sup-card">
+      <div class="rh"><h2>Pi avoidance supervisor</h2><span class="rmeta num" id="sup-meta">—</span></div>
+      <div class="chain" id="sup-chain">
+        <span class="cn" id="sc-IDLE">IDLE</span><span class="ar">→</span>
+        <span class="cn" id="sc-CONFIRMING">CONFIRMING</span><span class="ar">→</span>
+        <span class="cn" id="sc-TRACK">TRACK</span><span class="ar">→</span>
+        <span class="cn" id="sc-COMMIT">COMMIT</span><span class="ar">→</span>
+        <span class="cn" id="sc-REFRACTORY">REFRACTORY</span><span class="ar">→ IDLE</span>
+        <span class="cn badge" id="sc-PAUSED">PAUSED · STM32 busy</span>
+        <span class="cn badge" id="sc-DISABLED">DISABLED · --no-avoid</span>
+      </div>
+      <div id="sup-now"></div>
+    </section>
+  </div>
+
+  <!-- column 3: controls, the CLI's status line, telemetry, console -->
+  <div class="rcol last">
+    <section class="rcard" id="ctl">
+      <div class="ctl-row">
+        <button id="b-start" class="primary">Start</button>
+        <button id="b-stop" class="danger">Stop car</button>
+        <button id="b-rerun">Rerun</button>
+        <button id="b-end">End session</button>
+        <button id="b-reboot" class="ghost">Reboot STM32</button>
+      </div>
+      <div class="ctl-row opts">
+        <label><input type="checkbox" id="o-dry"> --dry</label>
+        <label><input type="checkbox" id="o-noavoid"> --no-avoid</label>
+        <label>--port <input id="o-port" class="num" spellcheck="false"></label>
+      </div>
+      <div class="ctl-row speed-row">
+        <label for="o-speed">Speed <b class="num" id="o-speed-v">—</b> PWM</label>
+        <input type="range" id="o-speed" min="40" max="150" step="1" disabled>
+      </div>
+      <div class="ctl-msg" id="ctl-msg"></div>
+      <div class="banner num" id="banner"></div>
+    </section>
+    <section class="rcard">
+      <div class="rh"><h2>Status line · every tick</h2><span class="rmeta num" id="sl-meta"></span></div>
+      <div class="fields" id="fields"></div>
+    </section>
+    <section class="rcard">
+      <div class="rh"><h2>Telemetry · link · loop</h2><span class="rmeta num" id="tl-meta"></span></div>
+      <div class="fields" id="tfields"></div>
+      <div class="chips" id="tchips"></div>
+    </section>
+    <section class="rcard grow console-card">
+      <div class="rh"><h2>Console</h2>
+        <label class="cons-opt"><input type="checkbox" id="c-status" checked> 1 Hz status lines</label>
+        <button id="c-clear" class="mini">Clear view</button>
+        <span class="rmeta" id="c-follow">following</span></div>
+      <pre id="console" class="num"></pre>
+    </section>
+  </div>
+</div>
+
 <script>
-const $ = id => document.getElementById(id);
-let tab = location.hash.slice(1) || "run";
-let logIdx = 0, builtParams = false, calMode = "camera", calCls = "mat";
+const CSSCOL={RED:"#EE2737",GREEN:"#44D62C",MAGENTA:"#FF00FF",UNKNOWN:"#8A8F99"};
+const CHAN=["H","S","V"],CHMAX=[179,255,255];
+/* mirrors FLOOR_DEFAULTS in sensors/camera.py */
+const FLOOR_DEFAULTS={enabled:true,white_s_max:70,white_v_min:120,strip_px:10,min_white_frac:0.4,
+  linked:true,dark_v_max:50,ignore_bottom_px:0};
+const FLOOR_PARAMS={
+  white_s_max:["White mat: saturation ≤",0,255,1],
+  white_v_min:["White mat: brightness ≥",0,255,1],
+  strip_px:["Contact strip under a blob (px)",2,40,1],
+  min_white_frac:["White share of the strip",0,1,0.05],
+  dark_v_max:["Wall-dark: brightness ≤",0,255,1],
+  ignore_bottom_px:["Ignore bottom rows (car body, px)",0,200,1],
+};
+const FUSION_PARAMS={
+  bearing_match_deg:["Bearing window (± °)",0,30,1],
+  range_floor_mm:["Range floor (mm)",0,600,10],
+  gap_split_mm:["Pillar/wall gap split (mm)",0,800,10],
+};
+const VERDICT_TEXT={
+  ok:"selected a near return",
+  far_only:"picked the FARTHEST return — likely the wall, no near/pillar return in window",
+  all_floored:"every return was floored out — range floor too high?",
+  empty:"no lidar returns in this window — bearing misaligned, or pillar not in scan plane",
+};
+let cfg=null,colour="RED",view="blobs",lastWindows=[];
+let activeTab="cal";
+const calOn=()=>activeTab==="cal";
+
+/* ---------- feed ---------- */
+function refreshFeed(){
+  document.getElementById("feed").src=`/stream/${view}?colour=${colour}&t=${Date.now()}`;
+  document.getElementById("feedhint").textContent=
+    view==="mask"?`White = what ${colour.toLowerCase()} matches (the raw colour threshold, before the floor filter).`:
+    view==="overlay"?`Matched ${colour.toLowerCase()} kept, rest dimmed.`:
+    view==="blobs"?"Boxes are pillar detections, labelled with bearing. Dashed grey = rejected by the floor filter (not on the mat, or a wall between).":
+    view==="floor"?"Floor filter (shown even when switched off): blue = white mat linked to the floor in front of the car, purple = white but cut off by a wall, hatched = ignored bottom rows. Each blob's contact strip is green (pass) or red (fail), with the white share.":
+    "Unprocessed camera frame.";
+}
+
+/* ---------- controls ---------- */
+function bandsHTML(){
+  const ranges=cfg.hsv[colour]||[];
+  return ranges.map((r,ri)=>`
+    <div class="band"><div class="cap">${ranges.length>1?`Range ${ri+1} of ${ranges.length}`:"Threshold range"}</div>
+    ${CHAN.map((ch,ci)=>`
+      <div class="rng"><label>${ch} lower <b class="num">${r[0][ci]}</b></label>
+        <input type="range" data-r="${ri}" data-b="0" data-i="${ci}" min="0" max="${CHMAX[ci]}" value="${r[0][ci]}"></div>
+      <div class="rng"><label>${ch} upper <b class="num">${r[1][ci]}</b></label>
+        <input type="range" data-r="${ri}" data-b="1" data-i="${ci}" min="0" max="${CHMAX[ci]}" value="${r[1][ci]}"></div>`).join("")}
+    </div>`).join("");
+}
+function fusionBandsHTML(){
+  const F=cfg.fusion||{};
+  return Object.entries(FUSION_PARAMS).map(([k,[lbl,mn,mx,st]])=>`
+    <div class="rng"><label>${lbl} <b class="num" id="fp-${k}">${F[k]??mn}</b></label>
+      <input type="range" data-fk="${k}" min="${mn}" max="${mx}" step="${st}" value="${F[k]??mn}"></div>`).join("");
+}
+function floorBandsHTML(){
+  const F=Object.assign({},FLOOR_DEFAULTS,cfg.floor||{});
+  return Object.entries(FLOOR_PARAMS).map(([k,[lbl,mn,mx,st]])=>`
+    <div class="rng"><label>${lbl} <b class="num" id="flp-${k}">${F[k]}</b></label>
+      <input type="range" data-flk="${k}" min="${mn}" max="${mx}" step="${st}" value="${F[k]}"></div>`).join("");
+}
+function ensureFloor(){cfg.floor=Object.assign({},FLOOR_DEFAULTS,cfg.floor||{});}
+function renderControls(){
+  document.getElementById("bands").innerHTML=bandsHTML();
+  document.querySelectorAll("#bands input[type=range]").forEach(s=>{
+    s.addEventListener("input",e=>{const t=e.target;
+      cfg.hsv[colour][+t.dataset.r][+t.dataset.b][+t.dataset.i]=+t.value;
+      t.previousElementSibling.querySelector("b").textContent=t.value;pushLive();});
+  });
+  document.getElementById("fusionBands").innerHTML=fusionBandsHTML();
+  document.querySelectorAll("#fusionBands input[type=range]").forEach(s=>{
+    s.addEventListener("input",e=>{const t=e.target,k=t.dataset.fk;
+      if(!cfg.fusion)cfg.fusion={};cfg.fusion[k]=+t.value;
+      document.getElementById("fp-"+k).textContent=t.value;pushLive();});
+  });
+  document.getElementById("floorBands").innerHTML=floorBandsHTML();
+  document.querySelectorAll("#floorBands input[type=range]").forEach(s=>{
+    s.addEventListener("input",e=>{const t=e.target,k=t.dataset.flk;ensureFloor();
+      cfg.floor[k]=+t.value;document.getElementById("flp-"+k).textContent=t.value;pushLive();});
+  });
+  {const F=Object.assign({},FLOOR_DEFAULTS,cfg.floor||{});
+   document.getElementById("fl-en").checked=!!F.enabled;document.getElementById("fl-link").checked=!!F.linked;}
+  document.getElementById("hfov").value=cfg.hfov_deg;
+  document.getElementById("hfov-v").textContent=cfg.hfov_deg;
+  document.getElementById("area").value=cfg.min_blob_area;
+  document.getElementById("area-v").textContent=cfg.min_blob_area;
+  document.getElementById("swap").checked=!!cfg.swap_rb;
+  const _tv=((cfg.lidar&&cfg.lidar.bearing_tol_deg)==null)?2:cfg.lidar.bearing_tol_deg;
+  document.getElementById("btol").value=_tv;
+  document.getElementById("btol-v").textContent=_tv;
+  {const st=document.getElementById("stream-tol"); if(st) st.textContent=_tv;}  /* the stream hint may have replaced it */
+}
+let pending=null;
+function pushLive(){markDirty();clearTimeout(pending);
+  pending=setTimeout(()=>fetch("/api/live",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(cfg)}),60);}
+function markDirty(){const b=document.getElementById("save");b.disabled=false;b.textContent="Save to config.json";}
+
+/* ---------- radar ---------- */
+function scaffold(ctx,W,H,maxMm){
+  const cx=W/2,cy=H/2,R=Math.min(W,H)/2-10,scale=R/(maxMm||3000);
+  ctx.clearRect(0,0,W,H);ctx.strokeStyle="#E4E4DE";ctx.lineWidth=1;
+  for(let mm=500;mm<=maxMm;mm+=500){ctx.beginPath();ctx.arc(cx,cy,mm*scale,0,7);ctx.stroke();}
+  ctx.beginPath();ctx.moveTo(cx,cy-R);ctx.lineTo(cx,cy+R);ctx.moveTo(cx-R,cy);ctx.lineTo(cx+R,cy);ctx.stroke();
+  ctx.strokeStyle="#EF6C1A";ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(cx,cy-R);ctx.stroke();
+  return {cx,cy,R,scale};
+}
+function polar(g,deg,mm){const a=deg*Math.PI/180;return [g.cx-mm*g.scale*Math.sin(a),g.cy-mm*g.scale*Math.cos(a)];}
+function qColour(q){const gg=Math.min(255,q*4);return `rgb(${255-gg},${gg},60)`;}
+
+/* drawRawOn / drawRadarOn / drawStrip / renderWindowsInto take their target as
+   an argument so the Obstacle-run tab draws with exactly the same code. */
+function drawRawOn(canvas,d){
+  const ctxRaw=canvas.getContext("2d");
+  const g=scaffold(ctxRaw,canvas.width,canvas.height,d.radar_max_mm||3000);
+  (d.ranges||[]).forEach((mm,deg)=>{if(mm===null)return;
+    const q=(d.qualities&&d.qualities[deg])||0;const [x,y]=polar(g,deg,Math.min(mm,d.radar_max_mm));
+    ctxRaw.fillStyle=qColour(q);ctxRaw.fillRect(x-1.5,y-1.5,3,3);});
+  ctxRaw.fillStyle="#0D1B3E";ctxRaw.beginPath();ctxRaw.arc(g.cx,g.cy,4,0,7);ctxRaw.fill();
+  return g;
+}
+const radarRaw=document.getElementById("radarRaw");
+function drawRaw(d){drawRawOn(radarRaw,d);}
+
+const radar=document.getElementById("radar");
+function drawRadar(d){drawRadarOn(radar,d);}
+function drawRadarOn(canvas,d){
+  const ctxO=canvas.getContext("2d");
+  const g=scaffold(ctxO,canvas.width,canvas.height,d.radar_max_mm||3000);
+  /* faint raw returns for context */
+  ctxO.fillStyle="#C7CCD6";
+  (d.ranges||[]).forEach((mm,deg)=>{if(mm===null)return;const [x,y]=polar(g,deg,Math.min(mm,d.radar_max_mm));ctxO.fillRect(x-1,y-1,2,2);});
+  /* each obstacle's window: wedge + camera ray + the window's returns highlighted */
+  const match=(cfg.fusion&&cfg.fusion.bearing_match_deg)||8;
+  (d.windows||[]).forEach(w=>{
+    const col=CSSCOL[w.color]||"#888";
+    /* camera bearing ray */
+    const [rx,ry]=polar(g,w.bearing_deg,d.radar_max_mm);
+    ctxO.strokeStyle=col;ctxO.globalAlpha=0.35;ctxO.lineWidth=1;
+    ctxO.beginPath();ctxO.moveTo(g.cx,g.cy);ctxO.lineTo(rx,ry);ctxO.stroke();ctxO.globalAlpha=1;
+    /* window returns, coloured by role */
+    w.points.forEach(p=>{
+      const [x,y]=polar(g,p.deg,Math.min(p.mm,d.radar_max_mm));
+      ctxO.fillStyle = !p.passed_floor ? "#EE2737" : (p.kept ? "#0D1B3E" : "#8A8F99");
+      ctxO.beginPath();ctxO.arc(x,y,2.5,0,7);ctxO.fill();
+    });
+    /* chosen distance marker */
+    if(w.chosen_mm!==null){
+      const [cxp,cyp]=polar(g,w.center_deg,Math.min(w.chosen_mm,d.radar_max_mm));
+      ctxO.strokeStyle="#EF6C1A";ctxO.lineWidth=2.5;
+      ctxO.beginPath();ctxO.arc(cxp,cyp,7,0,7);ctxO.stroke();
+    }
+  });
+  ctxO.fillStyle="#0D1B3E";ctxO.beginPath();ctxO.arc(g.cx,g.cy,4,0,7);ctxO.fill();
+  return g;
+}
+
+/* ---------- window inspector strips ---------- */
+function drawStrip(canvas,w,maxMm,floorMm){
+  const ctx=canvas.getContext("2d"),W=canvas.width,H=canvas.height,padL=6,padR=6,axisY=H-16;
+  ctx.clearRect(0,0,W,H);
+  const x=mm=>padL+(Math.min(mm,maxMm)/maxMm)*(W-padL-padR);
+  /* axis */
+  ctx.strokeStyle="#D8D8D2";ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(padL,axisY);ctx.lineTo(W-padR,axisY);ctx.stroke();
+  ctx.fillStyle="#9aa0aa";ctx.font="10px ui-monospace,monospace";
+  for(let mm=0;mm<=maxMm;mm+=1000){ctx.fillText((mm/1000)+"m",x(mm),H-3);ctx.beginPath();ctx.moveTo(x(mm),axisY-3);ctx.lineTo(x(mm),axisY+3);ctx.stroke();}
+  /* floor line */
+  const floor=(floorMm!==undefined)?floorMm:((cfg.fusion&&cfg.fusion.range_floor_mm)||0);
+  if(floor>0){const fx=x(floor);ctx.strokeStyle="#EE2737";ctx.globalAlpha=0.4;ctx.setLineDash([3,3]);
+    ctx.beginPath();ctx.moveTo(fx,4);ctx.lineTo(fx,axisY);ctx.stroke();ctx.setLineDash([]);ctx.globalAlpha=1;}
+  /* points, stacked slightly by offset so overlaps are visible */
+  (w.points||[]).forEach(p=>{
+    const px=x(p.mm), py=axisY-8-((p.off%5+5)%5)*8;
+    ctx.fillStyle=!p.passed_floor?"#EE2737":(p.kept?"#0D1B3E":"#8A8F99");
+    ctx.beginPath();ctx.arc(px,py,3,0,7);ctx.fill();
+  });
+  /* chosen */
+  if(w.chosen_mm!==null){const cx=x(w.chosen_mm);
+    ctx.strokeStyle="#EF6C1A";ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(cx,2);ctx.lineTo(cx,axisY);ctx.stroke();}
+}
+function renderWindows(d){
+  renderWindowsInto(document.getElementById("windows"),d,"strip-",undefined,-1);
+  lastWindows=d.windows||[];
+}
+function renderWindowsInto(host,d,prefix,floorMm,nearIdx,nearTag){
+  const wins=d.windows||[];
+  if(!wins.length){host.innerHTML='<p class="empty">No camera obstacles right now. Point the camera at a pillar.</p>';return;}
+  const maxMm=d.radar_max_mm||3000;
+  host.innerHTML=wins.map((w,i)=>`
+    <div class="win">
+      <div class="win-head">
+        <span class="chip" style="background:${CSSCOL[w.color]||'#888'}"></span>
+        <span class="name">${w.color} @ ${w.bearing_deg>0?"+":""}${w.bearing_deg}°</span>${i===nearIdx?`<span class="tag-target">${nearTag||"nearest"}</span>`:''}
+        <span class="num">chosen: ${w.chosen_mm===null?"—":w.chosen_mm+" mm"}</span>
+        <span class="num" style="color:#9aa0aa">${w.points.length} returns · ${w.n_floored} floored</span>
+        <span class="verdict v-${w.verdict}">${VERDICT_TEXT[w.verdict]||w.verdict}</span>
+      </div>
+      <canvas class="strip" id="${prefix}${i}" width="520" height="66"></canvas>
+    </div>`).join("");
+  wins.forEach((w,i)=>drawStrip(document.getElementById(prefix+i),w,maxMm,floorMm));
+}
+
+/* ---------- polls ---------- */
+async function pollRaw(){
+  try{if(!calOn())throw 0;const d=await(await fetch("/api/lidar_raw")).json();const s=document.getElementById("lidarstats");
+    if(!d.ok||!d.stats){s.textContent="no lidar — check /dev/ttyUSB0";}
+    else{s.textContent=`${d.stats.valid_count}/${d.stats.total} returning · ${d.stats.age_s}s ago`;drawRaw(d);}
+  }catch(e){}setTimeout(pollRaw,200);
+}
+async function poll(){
+  try{if(!calOn())throw 0;const d=await(await fetch("/api/worldstate")).json();
+    document.getElementById("d-cam").className="dot "+(d.camera_ok?"on":"off");
+    document.getElementById("d-lidar").className="dot "+(d.lidar_ok?"on":"off");
+    document.getElementById("front").textContent=d.front_mm===null?"—":d.front_mm+" mm";
+    drawRadar(d);renderWindows(d);
+  }catch(e){}setTimeout(poll,200);
+}
+const btol=document.getElementById("btol");
+function fmtBearing(p){return p?`${p.mm} mm · q${p.q} @${p.deg}°`:"no return";}
+function applyBearings(d){const P=d.picks||{};
+  ["deg0","deg90","deg270"].forEach(k=>{
+    const el=document.getElementById("b-"+k),p=d.ok?P[k]:null;
+    el.textContent=d.ok?fmtBearing(p):"—";
+    el.classList.toggle("miss",!p);});
+}
+async function fetchBearings(){if(!calOn())return;try{applyBearings(await(await fetch("/api/bearings?tol="+btol.value)).json());}catch(e){}}
+async function pollBearings(){await fetchBearings();setTimeout(pollBearings,200);}
+btol.addEventListener("input",e=>{const v=+e.target.value;
+  document.getElementById("btol-v").textContent=v;
+  {const st=document.getElementById("stream-tol"); if(st) st.textContent=v;}
+  if(!cfg.lidar)cfg.lidar={};cfg.lidar.bearing_tol_deg=v;pushLive();
+  fetchBearings();});
+
+/* ---------- STM32 stream ---------- */
+let streamRunning=false;
+function fmtMm(v){return v===null||v===undefined?"—":v+" mm";}
+function applyStreamStatus(s){
+  document.getElementById("d-stream").className="dot "+(s.running&&s.live?"on":"off");
+  streamRunning=!!s.running;
+  document.getElementById("stream-toggle").textContent=streamRunning?"Stop streaming":"Start streaming";
+  const hint=document.getElementById("stream-hint");
+  if(!streamRunning){
+    ["s-f","s-l","s-r"].forEach(id=>{const el=document.getElementById(id);el.textContent="—";el.classList.add("miss");});
+    document.getElementById("s-revs").textContent="—";document.getElementById("s-queue").textContent="—";
+    hint.textContent=s.error?("Stopped — "+s.error):"Stopped. Streams left/front/right to the STM32 over /dev/ttyACM0 at ±"+btol.value+"° (the tolerance set above, live — no save needed).";
+    return;
+  }
+  document.getElementById("s-f").textContent=fmtMm(s.f);document.getElementById("s-f").classList.toggle("miss",s.f==null);
+  document.getElementById("s-l").textContent=fmtMm(s.l);document.getElementById("s-l").classList.toggle("miss",s.l==null);
+  document.getElementById("s-r").textContent=fmtMm(s.r);document.getElementById("s-r").classList.toggle("miss",s.r==null);
+  document.getElementById("s-revs").textContent=s.rev_per_s;
+  document.getElementById("s-queue").textContent=s.queue_depth;
+  hint.textContent=s.live?`Streaming to ${s.port} at ${s.send_hz} Hz.`:"Lidar STALE — going silent (STM32 watchdog will trip).";
+}
+async function pollStream(){try{if(!calOn())throw 0;applyStreamStatus(await(await fetch("/api/stream/status")).json());}catch(e){}setTimeout(pollStream,300);}
+document.getElementById("stream-toggle").addEventListener("click",async e=>{
+  const btn=e.target;btn.disabled=true;
+  try{
+    const url=streamRunning?"/api/stream/stop":"/api/stream/start";
+    const r=await(await fetch(url,{method:"POST"})).json();
+    if(!r.ok)document.getElementById("stream-hint").textContent="Error — "+r.error;
+  }catch(err){document.getElementById("stream-hint").textContent="Error — "+err;}
+  finally{btn.disabled=false;}
+});
+
+/* ---------- wiring ---------- */
+document.querySelectorAll(".tabs button").forEach(b=>{b.onclick=()=>{document.querySelectorAll(".tabs button").forEach(x=>x.setAttribute("aria-pressed",x===b));view=b.dataset.v;refreshFeed();};});
+document.querySelectorAll(".sw").forEach(b=>{b.onclick=()=>{document.querySelectorAll(".sw").forEach(x=>x.setAttribute("aria-pressed",x===b));colour=b.dataset.c;renderControls();renderSampleChips();if(picking)armPicker();refreshFeed();};});
+document.getElementById("hfov").addEventListener("input",e=>{cfg.hfov_deg=+e.target.value;document.getElementById("hfov-v").textContent=e.target.value;pushLive();});
+document.getElementById("area").addEventListener("input",e=>{cfg.min_blob_area=+e.target.value;document.getElementById("area-v").textContent=e.target.value;pushLive();});
+document.getElementById("swap").addEventListener("change",e=>{cfg.swap_rb=e.target.checked;pushLive();});
+document.getElementById("fl-en").addEventListener("change",e=>{ensureFloor();cfg.floor.enabled=e.target.checked;pushLive();});
+document.getElementById("fl-link").addEventListener("change",e=>{ensureFloor();cfg.floor.linked=e.target.checked;pushLive();});
+
+/* ---------- colour picker: sample a colour from several viewpoints ----------
+   The same pillar reads different HSV from different spots on the mat: the
+   lighting is uneven, so one threshold picked from one angle clips it
+   elsewhere. So picking ACCUMULATES. Arm it once (it stays armed), then click
+   the pillar from as many positions as you like — each click adds an 11x11
+   sample for the CURRENTLY SELECTED colour, and the threshold band is rebuilt
+   to span every sample (gross outliers trimmed), widening as you go. Samples
+   live only in the browser; only the resulting HSV bands go into cfg /
+   config.json. Runs fully client-side off the same-origin <img id="feed">, so
+   it needs no round trip to the Pi. Click the button again (or Esc) to stop.
+
+   pickSamples[colour] holds one entry per click: {px:[[r,g,b],...], rgb:mean}.
+   rebuildBands() flattens them and recomputes; removing a sample recomputes. */
+let picking=false, pickPrevView=null, pickCanvas=null;
+const pickSamples={RED:[],GREEN:[],MAGENTA:[]};
+
+function rgbToHsvDeg(r,g,b){
+  /* Returns [hue in REAL degrees 0-360, S 0-255, V 0-255]. Hue is kept in
+     real degrees (not halved to OpenCV's 0-179) so the circular mean below
+     works in one consistent unit; it is halved once, at the end. */
+  r/=255; g/=255; b/=255;
+  const max=Math.max(r,g,b), min=Math.min(r,g,b), d=max-min;
+  let h=0;
+  if(d>0){
+    if(max===r) h=60*(((g-b)/d)%6);
+    else if(max===g) h=60*((b-r)/d+2);
+    else h=60*((r-g)/d+4);
+  }
+  if(h<0) h+=360;
+  return [h, max===0?0:Math.round((d/max)*255), Math.round(max*255)];
+}
+function percentile(sortedArr,p){
+  const i=Math.min(sortedArr.length-1,Math.max(0,Math.round(p/100*(sortedArr.length-1))));
+  return sortedArr[i];
+}
+function hueBandsDeg(centerDeg,halfDeg,sLo,vLo){
+  /* center/half in REAL degrees; convert to OpenCV 0-179 and split into two
+     ranges when the window crosses the 0/179 wrap, the same way the shipped
+     RED band does (real red sits right on that seam). */
+  const cap=v=>Math.max(0,Math.min(255,Math.round(v)));
+  const c=Math.round((((centerDeg%360)+360)%360)/2);
+  const half=Math.min(45,Math.max(6,Math.round(halfDeg/2)+3));   // opencv units, padded, capped
+  const lo=c-half, hi=c+half;
+  if(lo<0) return [[[0,cap(sLo),cap(vLo)],[Math.round(hi),255,255]],
+                   [[Math.round(180+lo),cap(sLo),cap(vLo)],[179,255,255]]];
+  if(hi>179) return [[[Math.round(lo),cap(sLo),cap(vLo)],[179,255,255]],
+                     [[0,cap(sLo),cap(vLo)],[Math.round(hi-180),255,255]]];
+  return [[[Math.round(lo),cap(sLo),cap(vLo)],[Math.round(hi),255,255]]];
+}
+function rebuildBands(col){
+  /* Rebuild cfg.hsv[col] to span every accumulated sample for col. */
+  const groups=pickSamples[col];
+  if(!groups.length) return null;
+  const hs=[],ss=[],vs=[];
+  for(const g of groups) for(const [r,gr,b] of g.px){
+    const [h,s,v]=rgbToHsvDeg(r,gr,b); hs.push(h); ss.push(s); vs.push(v);
+  }
+  // Circular mean hue (handles the 0/360 wrap that real red straddles).
+  let sumSin=0,sumCos=0;
+  for(const h of hs){const rad=h*Math.PI/180; sumSin+=Math.sin(rad); sumCos+=Math.cos(rad);}
+  let meanDeg=Math.atan2(sumSin,sumCos)*180/Math.PI; if(meanDeg<0) meanDeg+=360;
+  // Half-width = a high percentile of the per-pixel angular deviation, so a
+  // stray floor/edge pixel in one patch cannot blow the band wide open while
+  // genuine lighting spread across viewpoints still widens it.
+  const devs=hs.map(h=>{let d=Math.abs(h-meanDeg); return d>180?360-d:d;}).sort((a,b)=>a-b);
+  const halfDeg=percentile(devs,97);
+  ss.sort((a,b)=>a-b); vs.sort((a,b)=>a-b);
+  const sLo=Math.max(0,percentile(ss,5)-15), vLo=Math.max(0,percentile(vs,5)-15);
+  cfg.hsv[col]=hueBandsDeg(meanDeg,halfDeg,sLo,vLo);
+  renderControls(); pushLive();
+  return {cCv:Math.round(meanDeg/2), halfCv:Math.min(45,Math.max(6,Math.round(halfDeg/2)+3)),
+          sLo,vLo, n:groups.length};
+}
+function renderSampleChips(){
+  const groups=pickSamples[colour], n=groups.length;
+  const box=document.getElementById("pick-samples");
+  box.innerHTML=groups.map((g,i)=>
+    `<button class="samp" data-i="${i}" title="Remove this sample"
+       style="background:rgb(${g.rgb[0]},${g.rgb[1]},${g.rgb[2]})"></button>`).join("");
+  box.querySelectorAll(".samp").forEach(el=>{
+    el.onclick=()=>{ pickSamples[colour].splice(+el.dataset.i,1);
+      if(pickSamples[colour].length) rebuildBands(colour);
+      renderSampleChips(); updatePickCount(); };
+  });
+  document.getElementById("pick-undo").disabled=!n;
+  document.getElementById("pick-clear").disabled=!n;
+  updatePickCount();
+}
+function updatePickCount(){
+  const n=pickSamples[colour].length;
+  document.getElementById("pick-count").textContent=
+    n? `${n} sample${n>1?"s":""} of ${colour} — mask spans them all`
+     : `No ${colour} samples yet`;
+}
+function setTabsView(v){
+  view=v;
+  document.querySelectorAll(".tabs button").forEach(x=>x.setAttribute("aria-pressed",x.dataset.v===v));
+  refreshFeed();
+}
+function armPicker(){
+  picking=true; pickPrevView=view;
+  document.getElementById("pick").setAttribute("aria-pressed","true");
+  document.getElementById("pick").textContent="Picking… (Esc to stop)";
+  document.getElementById("feedwrap").classList.add("picking");
+  document.getElementById("pick-hint").textContent=
+    `Click ${colour} in the feed from several spots on the mat — each click widens the mask.`;
+  if(view!=="raw") setTabsView("raw");
+}
+function disarmPicker(restore){
+  picking=false;
+  document.getElementById("pick").setAttribute("aria-pressed","false");
+  document.getElementById("pick").textContent="Pick from feed";
+  document.getElementById("feedwrap").classList.remove("picking");
+  document.getElementById("pick-hint").textContent=
+    "Arm, then click the same obstacle from several spots — the mask widens to cover every sample.";
+  if(restore && pickPrevView && pickPrevView!==view) setTabsView(pickPrevView);
+  pickPrevView=null;
+}
+document.getElementById("pick").addEventListener("click",()=>{picking?disarmPicker(true):armPicker();});
+document.getElementById("pick-undo").addEventListener("click",()=>{
+  pickSamples[colour].pop();
+  if(pickSamples[colour].length) rebuildBands(colour);
+  renderSampleChips();
+});
+document.getElementById("pick-clear").addEventListener("click",()=>{
+  pickSamples[colour]=[];
+  renderSampleChips();
+});
+document.addEventListener("keydown",e=>{ if(e.key==="Escape" && picking) disarmPicker(true); });
+document.getElementById("feed").addEventListener("click",e=>{
+  if(!picking) return;
+  const img=e.target, rect=img.getBoundingClientRect(), hint=document.getElementById("pick-hint");
+  if(!img.naturalWidth){hint.textContent="Feed not loaded yet — wait for a frame, then click again.";return;}
+  const nx=Math.round((e.clientX-rect.left)/rect.width*img.naturalWidth);
+  const ny=Math.round((e.clientY-rect.top)/rect.height*img.naturalHeight);
+  pickCanvas=pickCanvas||document.createElement("canvas");
+  pickCanvas.width=img.naturalWidth; pickCanvas.height=img.naturalHeight;
+  const ctx=pickCanvas.getContext("2d");
+  let data;
+  try{
+    ctx.drawImage(img,0,0);
+    const half=5, x0=Math.max(0,nx-half), y0=Math.max(0,ny-half);
+    const w=Math.min(pickCanvas.width-x0,half*2+1), h=Math.min(pickCanvas.height-y0,half*2+1);
+    data=ctx.getImageData(x0,y0,w,h).data;
+  }catch(err){hint.textContent="Could not read the feed pixels in this browser.";return;}
+
+  const px=[]; let rs=0,gs=0,bs=0,n=0;
+  for(let i=0;i<data.length;i+=4){
+    px.push([data[i],data[i+1],data[i+2]]);
+    rs+=data[i]; gs+=data[i+1]; bs+=data[i+2]; n++;
+  }
+  const rgb=[Math.round(rs/n),Math.round(gs/n),Math.round(bs/n)];
+  pickSamples[colour].push({px,rgb});
+  const info=rebuildBands(colour);
+  renderSampleChips();
+  hint.innerHTML=`Sample ${info.n} of <b>${colour}</b> added → H ${info.cCv}±${info.halfCv} · `
+    +`S ≥ ${info.sLo} · V ≥ ${info.vLo}. Keep sampling other spots, or press Esc.`;
+
+  const marker=document.getElementById("pick-marker");
+  marker.style.left=(e.clientX-rect.left)+"px"; marker.style.top=(e.clientY-rect.top)+"px";
+  marker.style.background=`rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
+  marker.classList.add("show");
+  clearTimeout(marker._t); marker._t=setTimeout(()=>marker.classList.remove("show"),1600);
+  // stays armed: the next click adds another viewpoint.
+});
+document.getElementById("save").onclick=async()=>{const b=document.getElementById("save");const r=await(await fetch("/api/save",{method:"POST"})).json();if(r.ok){b.disabled=true;b.textContent="Saved — restart main.py";}else{b.textContent="Save failed: "+r.error;}};
+document.getElementById("revert").onclick=async()=>{const r=await(await fetch("/api/config")).json();cfg=r.saved;renderControls();pushLive();};
+
+
+/* ======================================================================
+   OBSTACLE RUN TAB
+   ====================================================================== */
+const $=id=>document.getElementById(id);
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const mm=v=>v==null?"—":`${Math.round(v)} mm`;
+const sg=(v,d=1)=>v==null?"—":(v>=0?"+":"")+Number(v).toFixed(d);
+const wrap180=a=>{a=((a+180)%360+360)%360-180;return a<=-180?a+360:a;};
+const secs=ms=>ms==null?"—":(ms/1000).toFixed(1)+" s";
+const pct=f=>Math.max(0,Math.min(100,f*100));
+const nbar=f=>`<span class="nbar"><i style="width:${pct(f).toFixed(0)}%"></i></span>`;
+const STN=["BOOT","HEADING","AVOID","TURN90","FINISH","RECOVER","STOPPED"];
+/* ObstacleLap.cpp constants, mirrored for the descriptions only */
+const FW={START_DELAY:5000,GRACE:15000,SIDE_OPEN:1500,REVS:3,PANIC:200,CLEAR:350,REC_PWM:90,
+  REC_MAX:300,REC_TRIES:3,CORNERS:12,SAFETY:4000,CORNER_LOCK:500,AVOID_LOCK:300,AVOID_CAP:1500,
+  AVOID_TO:5000,FIN_TOL:60,BASE:70,AVOID_PWM:60,TURN_CAP:1200,TURN_STOP:0.3,LIDAR_STALE:200,
+  LIDAR_DEAD:1000,LINK_STALE:250,STRAIGHT:76.5,CONFIRM:3};
+const ICON={fire:"▶",block:"■",wait:"○",ok:"✓",warn:"!",info:"·"};
+const TAG={fire:"fires",block:"blocking",wait:"waiting",ok:"ok",warn:"warning",info:""};
+function nrow(kind,label,value){
+  return `<div class="nrow k-${kind}"><span class="nk">${ICON[kind]}</span><span class="nl">${label}</span>`+
+         `<span class="nv num">${value}</span>${TAG[kind]?`<span class="nt">${TAG[kind]}</span>`:"<span></span>"}</div>`;}
+const nsec=t=>`<div class="nsec">${t}</div>`;
+function servoText(sv){if(sv==null)return"—";const d=sv-FW.STRAIGHT;
+  return Math.abs(d)<0.3?`straight (${sv.toFixed(1)})`:`${Math.abs(d).toFixed(1)}° ${d<0?"left":"right"} (${sv.toFixed(1)})`;}
+function fmtAge(s){return s==null?"—":s<1?`${Math.round(s*1000)} ms`:`${s.toFixed(1)} s`;}
+
+let runSince=0,runBusy=false,runData=null,prevStm=null,stmHist=[],hotEdge=null,hotUntil=0;
+let portTouched=false,rebootArm=0,lastMsg={text:"",t:0,kind:"info"};
 
 /* ---------------- tabs ---------------- */
-function setTab(t){
-  tab = t;
-  for (const k of ["run","tune","cal"]) $("tab-"+k).hidden = (k !== t);
-  document.querySelectorAll(".tabbar button")
-    .forEach(b => b.setAttribute("aria-selected", b.dataset.tab === t));
-  // Only one MJPEG stream at a time: each one holds a connection and a
-  // decode loop, and two of them on a Pi 4 costs frames the detector needs.
-  $("run-feed").src = (t === "run") ? "/run/stream?t=" + Date.now() : "";
-  $("cal-feed").src = (t === "cal") ? "/cal/stream?mode=" + calMode + "&t=" + Date.now() : "";
-  if (t === "tune" && !builtParams) loadParams(true);
-  if (location.hash !== "#"+t) history.replaceState(null, "", "#"+t);
+function setTab(tab){
+  activeTab=tab;
+  document.querySelectorAll(".tabbar button").forEach(b=>b.setAttribute("aria-selected",b.dataset.tab===tab));
+  $("tab-cal").hidden=tab!=="cal"; $("tab-run").hidden=tab!=="run";
+  $("pills-cal").hidden=tab!=="cal"; $("pills-run").hidden=tab!=="run";
+  if(tab==="cal"){ $("run-feed").removeAttribute("src"); refreshFeed(); }
+  else { $("feed").removeAttribute("src"); $("run-feed").src="/run/stream?t="+Date.now(); }
+  if(location.hash!=="#"+tab) history.replaceState(null,"","#"+tab);
 }
-document.querySelectorAll(".tabbar button")
-  .forEach(b => b.onclick = () => setTab(b.dataset.tab));
+document.querySelectorAll(".tabbar button").forEach(b=>b.onclick=()=>setTab(b.dataset.tab));
 
-/* ---------------- helpers ---------------- */
-const f0 = v => (v===null||v===undefined) ? "—" : Math.round(v);
-const f1 = v => (v===null||v===undefined) ? "—" : (+v).toFixed(1);
-function rows(el, pairs){
-  el.innerHTML = pairs.map(([k,v]) =>
-    `<tr><td class="k">${k}</td><td class="v">${v===null||v===undefined?"—":v}</td></tr>`
-  ).join("");
-}
-async function post(url, body){
-  const r = await fetch(url, {method:"POST", headers:{"Content-Type":"application/json"},
-                             body: JSON.stringify(body||{})});
-  const j = await r.json().catch(()=>({}));
-  if (!j.ok && j.error) flash(j.error, "bad");
-  return j;
-}
-function flash(msg, kind){
-  const d = $("run-alerts");
-  d.innerHTML = `<div class="alert ${kind||"warn"}">${msg}</div>`;
-  setTimeout(()=>{ if (d.firstChild && d.firstChild.textContent === msg) d.innerHTML=""; }, 6000);
-}
-function confirmReboot(){
-  if (confirm("Reboot the STM32? The session ends, the car stops, and the "
-            + "board re-zeroes its yaw — keep the car still."))
-    post("/api/run/reboot");
-}
-
-/* ---------------- run tab ---------------- */
-function paintRun(d){
-  const t = d.tick, fsm = t && t.fsm, s = d.session;
-
-  // pills
-  setPill("p-cam", d.camera_ok, d.camera_ok ? `camera ${d.vision_fps} fps` : "no camera");
-  const lok = d.lidar.ok && d.lidar.thread_alive;
-  setPill("p-lidar", lok, lok ? `lidar ${d.lidar.stats ? d.lidar.stats.rev : ""} rev` : "no lidar");
-  const tel = t && t.telem;
-  setPill("p-stm", t && t.telem_fresh, (t && t.telem_fresh)
-    ? (tel.link_stale ? "STM32 link stale" : "STM32 ok") : "no telemetry");
-  setPill("p-sess", d.active, d.active ? (s.dry ? "dry session" : "session open")
-                                       : "no session");
-
-  // state
-  $("state").textContent = fsm ? fsm.state : (d.active ? "starting…" : "no session");
-  $("substate").innerHTML = fsm
-    ? `corner ${fsm.corner}/${fsm.target_corners} · `
-      + `${fsm.direction_locked ? (fsm.clockwise?"clockwise":"anticlockwise")
-           : "direction not locked"} · lane ${f1(fsm.lane_heading)}°`
-      + (t.intent ? ` · <span class="dim">${t.intent.reason}</span>` : "")
-    : "";
-
-  $("b-go").disabled = !d.active;
-  $("b-stop").disabled = !d.active;
-  $("b-open").disabled = d.active || !!d.busy;
-  $("b-dry").disabled = d.active || !!d.busy;
-  $("b-end").disabled = !d.active || !!d.busy;
-  $("b-reboot").disabled = !!d.busy;
-
-  $("reboot").textContent = (d.reboot && d.reboot.phase !== "idle")
-    ? `${d.reboot.phase}: ${d.reboot.message}` : "";
-
-  // alerts that matter
-  let al = "";
-  if (t && !t.telem_fresh && d.active)
-    al = `<div class="alert bad">No TELEM from the STM32 — the FSM is blind and is commanding STOP.</div>`;
-  else if (tel && tel.recovering)
-    al = `<div class="alert warn">Wall panic: the STM32 is reversing (try ${tel.recover_tries}).</div>`;
-  else if (t && !t.lidar_live && d.active)
-    al = `<div class="alert warn">LiDAR stale — holding heading, panic reflex stood down.</div>`;
-  else if (t && t.intent && t.intent.clamped)
-    al = `<div class="alert warn">mapper clamped: ${t.intent.clamped}</div>`;
-  if (al) $("run-alerts").innerHTML = al;
-  else if ($("run-alerts").querySelector(".alert.bad, .alert.warn"))
-    $("run-alerts").innerHTML = "";
-
-  // lane strip
-  if (fsm && fsm.planner) paintLane(fsm.planner, d.derived);
-
-  rows($("t-lane"), fsm ? [
-    ["lane offset", fsm.planner.lane_off_ok
-        ? `${f0(fsm.planner.lane_off)} mm` : `${f0(fsm.planner.lane_off)} mm (stale)`],
-    ["target", `${f0(fsm.planner.lat_target)} mm`],
-    ["yaw command", `${f1(fsm.planner.lat_yaw_cmd)}°`],
-    ["aim distance", `${f0(fsm.planner.aim_mm)} mm`],
-    ["along the lane", `${f0(fsm.planner.lane_along)} mm`],
-    ["cone L / R", `${f0(d.wall.left)} / ${f0(d.wall.right)} mm`],
-    ["wall angle", d.wall.yaw===null ? "no fit" : `${f1(d.wall.yaw)}°`],
-    ["levelled", `${f1(fsm.planner.level_total)}° this straight`],
-    ["next straight", fsm.planner.sec_colour
-        ? `${fsm.planner.sec_colour} (2nd pillar, ${f0(fsm.planner.sec_age_mm)} mm ago)`
-        : (fsm.planner.next_straight
-            ? `${fsm.planner.next_straight} (across the corner)` : "—")],
-    ["corner exit", `${f0(fsm.planner.corner_exit_cmd)} mm`],
-  ] : []);
-
-  const tr = fsm && fsm.planner ? fsm.planner.tracks : [];
-  $("t-tracks").innerHTML = tr.length
-    ? `<tr><th>colour</th><th>lat</th><th>ahead</th><th>hits</th><th></th></tr>` +
-      tr.map(x => `<tr><td style="color:${x.colour==="RED"?"var(--red)":"var(--green)"}">`
-        + `${x.colour}</td><td>${f0(x.lat)}</td><td>${f0(x.rel)}</td>`
-        + `<td>${x.hits}</td><td class="dim">${x.flipped?"flipped":""}</td></tr>`).join("")
-    : `<tr><td class="dim">no pillars tracked</td></tr>`;
-
-  rows($("t-percept"), t ? [
-    ["front / left / right", `${f0(t.front)} / ${f0(t.left)} / ${f0(t.right)} mm`],
-    ["pillar", t.pillar_colour
-        ? `${t.pillar_colour} at ${t.pillar_xy[0]} fwd, ${t.pillar_xy[1]} left mm`
-        : "none"],
-    ["pillar area", t.pillar_area || "—"],
-    ["2nd pillar", t.sec_colour
-        ? `${t.sec_colour} at ${t.sec_xy[0]} fwd, ${t.sec_xy[1]} left mm`
-        : "none"],
-    ["unknown object", t.unknown_xy
-        ? `${t.unknown_xy[0]} fwd, ${t.unknown_xy[1]} left mm` : "none"],
-    ["lidar candidates", t.n_candidates],
-    ["colour space", d.space || "—"],
-    ["blobs accepted", d.n_pillars],
-  ] : []);
-
-  rows($("t-telem"), tel ? [
-    ["heading", `${f1(tel.heading)}°`],
-    ["yaw rate", `${f1(tel.yaw_rate)}°/s`],
-    ["odometry", `${tel.odo} ticks`],
-    ["servo", `${f1(tel.servo)}°`],
-    ["floor colour", tel.floor],
-    ["motor", tel.enabled ? "<span class='ok'>enabled</span>" : "off"],
-    ["IMU", tel.imu_ok ? "<span class='ok'>ok</span>" : "<span class='bad'>no events</span>"],
-    ["arc done", tel.arc_done ? "yes" : "no"],
-    ["recovering", tel.recovering
-        ? `<span class='warn'>yes (try ${tel.recover_tries})</span>` : "no"],
-    ["link", tel.link_stale ? "<span class='bad'>stale</span>" : "ok"],
-    ["boot id", tel.boot_id],
-  ] : []);
-
-  rows($("t-loop"), t ? [
-    ["command", t.intent ? `${t.intent.mode} hd=${f1(t.intent.heading)}° `
-        + `st=${f1(t.intent.steer)}° pwm=${t.intent.speed}`
-        + (t.intent.reverse ? " REV" : "")
-        + (t.intent.mode==="ARC" ? ` lock=${t.intent.arc_lock}` : "") : "—"],
-    ["frame sent", t.sent ? "yes" : "no"],
-    ["tick", `${t.tick_ms} ms (age ${t.age_s}s)`],
-    ["lidar rev/s", `${t.rev_per_s}  queue ${t.queue_depth}`],
-    ["link frames", s && s.link
-        ? `tx ${s.link.tx_frames} · rx ${s.link.rx_frames} · `
-          + `bad ${s.link.rx_bad} · dropped ${s.link.rx_dropped}` : "—"],
-    ["session", s ? `${s.dry?"dry ":""}${s.port} · ${f1(s.elapsed_s)}s` : "—"],
-  ] : []);
-}
-
-function setPill(id, ok, text){
-  const e = $(id);
-  e.textContent = text;
-  e.className = "pill " + (ok ? "ok" : "bad");
-}
-
-function paintLane(pl, derived){
-  const lim = (derived && derived.LANE_LIMIT_MM) || 400;
-  const span = Math.max(lim * 1.25, 500);
-  const pos = v => 50 + 50 * (-v / span);   // + = left, drawn to the LEFT
-  const el = $("lane");
-  el.innerHTML =
-    `<i class="centre"></i>`
-  + `<i class="limit" style="left:${pos(lim)}%"></i>`
-  + `<i class="limit" style="left:${pos(-lim)}%"></i>`
-  + (pl.lane_off_ok ? `<i class="car" style="left:${pos(pl.lane_off)}%"></i>` : "")
-  + `<i class="tgt" style="left:${pos(pl.lat_target)}%"></i>`
-  + `<b style="left:${pos(pl.lane_off)}%;top:20px">car</b>`
-  + `<b style="left:${pos(pl.lat_target)}%">target</b>`;
-}
-
-/* ---------------- tune tab ---------------- */
-const GROUPS = {camera:"Camera", hsv:"HSV colour ranges", lab:"Lab colour ranges",
-  filter:"Pillar filter", cone:"Wall cone fit", locate:"Pillar location",
-  cand:"LiDAR candidates", plan:"Lane planner", pass:"Passing a pillar",
-  level:"Wall levelling", turn:"Corner trigger", corner:"Corner exit shaping",
-  mnv:"3-point corner", run:"Run", link:"Link"};
-
-function field(p, side){
-  const d = document.createElement("div"); d.className = "p";
-  const lab = document.createElement("label");
-  lab.textContent = p.name; lab.title = p.help || p.name;
-  const inp = document.createElement("input");
-  if (p.kind === "b"){ inp.type = "checkbox"; inp.checked = !!p.value; }
-  else {
-    inp.type = "number"; inp.value = p.value;
-    inp.step = (p.kind === "i") ? 1
-      : (Math.abs(p.hi - p.lo) <= 2 ? 0.01 : (Math.abs(p.hi - p.lo) <= 50 ? 0.1 : 1));
-    inp.min = p.lo; inp.max = p.hi;
+/* ---------------- polling ---------------- */
+async function pollRun(){
+  if(activeTab==="run"){
+    try{
+      const d=await(await fetch("/api/run/state?since="+runSince)).json();
+      if(d.log.last<runSince){runSince=0;$("console").textContent="";}
+      renderRun(d);
+      runSince=d.log.last;
+    }catch(e){ $("r-sess-t").textContent="dashboard unreachable"; $("r-sess").className="dot off"; }
   }
-  inp.id = side + ":" + p.name;
-  inp.title = `${p.lo} .. ${p.hi}`;
-  inp.onchange = () => send(side, p.name,
-    p.kind === "b" ? (inp.checked?1:0) : inp.value, inp);
-  d.append(lab, inp);
-  if (p.help){ const u = document.createElement("div");
-    u.className = "u"; u.textContent = p.help; d.append(u); }
-  return d;
-}
-async function send(side, name, value, inp){
-  inp.classList.add("dirty");
-  const r = await (await fetch("/api/param", {method:"POST",
-    headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({side, name, value})})).json();
-  if (r.ok){
-    inp.classList.remove("dirty");
-    if (inp.type !== "checkbox") inp.value = r.value;
-    $("tune-msg").textContent = name + " = " + r.value;
-    if (r.derived) showDerived(r.derived);
-  } else {
-    $("tune-msg").innerHTML = `<span class="bad">${name}: ${r.error}</span>`;
-  }
-}
-function section(title, items, side){
-  const fs = document.createElement("fieldset");
-  const lg = document.createElement("legend"); lg.textContent = title;
-  fs.append(lg);
-  items.forEach(p => fs.append(field(p, side)));
-  return fs;
-}
-function showDerived(dv){
-  $("p-derived").textContent = "derived: " +
-    Object.entries(dv).map(([k,v]) => `${k.replace("_MM","")} ${v}`).join(" · ");
-}
-async function loadParams(rebuild){
-  const r = await (await fetch("/api/params")).json();
-  $("stm-state").textContent = r.stm32_synced
-    ? `v${r.stm32_version}, ${r.stm32.length} parameters, boot ${r.stm32_boot}`
-    : "not connected — values appear once the STM32 answers";
-  showDerived(r.derived);
-  if (!rebuild && builtParams) return;
-  const pi = $("tune-pi"); pi.innerHTML = "";
-  const row = document.createElement("div"); row.className = "row";
-  for (const g in GROUPS){
-    const items = r.pi.filter(p => p.group === g);
-    if (items.length) row.append(section(GROUPS[g], items, "pi"));
-  }
-  pi.append(row);
-  const st = $("tune-stm"); st.innerHTML = "";
-  const row2 = document.createElement("div"); row2.className = "row";
-  (r.stm32_groups || []).forEach((g, i) => {
-    const items = r.stm32.filter(p => p.group === i);
-    if (items.length) row2.append(section("STM32 · " + g, items, "stm32"));
-  });
-  st.append(row2);
-  builtParams = r.pi.length > 0;
-}
-async function save(){
-  const r = await (await fetch("/api/save", {method:"POST"})).json();
-  $("tune-msg").textContent = r.msg;
-  $("cal-msg").innerHTML = `<span class="ok">${r.msg}</span>`;
-}
-async function revert(side){
-  if (!confirm("Put " + side + " parameters back to their defaults?")) return;
-  const r = await (await fetch("/api/revert", {method:"POST",
-    headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({side})})).json();
-  $("tune-msg").textContent = r.msg;
-  builtParams = false;
-  setTimeout(() => loadParams(true), 400);
+  setTimeout(pollRun,activeTab==="run"?100:400);
 }
 
-/* ---------------- calibrate tab ---------------- */
-function pick(c){
-  calCls = c;
-  for (const k of ["mat","red","green"]) $("c-"+k).classList.toggle("on", k === c);
-}
-function calView(m){
-  calMode = m;
-  $("cal-feed").src = "/cal/stream?mode=" + m + "&t=" + Date.now();
-}
-$("cal-feed").onclick = async e => {
-  const r = e.target.getBoundingClientRect();
-  const x = (e.clientX - r.left) / r.width * 320;
-  const y = (e.clientY - r.top) / r.height * 240;
-  const s = await (await fetch("/api/cal/sample", {method:"POST",
-    headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({cls: calCls, x, y})})).json();
-  if (s.ok){
-    $("cal-msg").innerHTML = `<span class="dim">${calCls} @ ${s.s.x},${s.s.y}</span> `
-      + `L ${s.s.L.toFixed(0)} a ${s.s.a.toFixed(0)} b ${s.s.b.toFixed(0)} `
-      + `<span class="dim">(HSV ${s.s.H.toFixed(0)},${s.s.S.toFixed(0)},${s.s.V.toFixed(0)})</span>`;
-    if (s.area_k) $("cal-areak").innerHTML =
-      `area ${s.area_k.area} at ${s.area_k.dist} mm → <b>AREA_K = ${s.area_k.k}</b> (applied)`;
-  } else $("cal-msg").innerHTML = `<span class="bad">${s.error}</span>`;
-  calRefresh();
-};
-async function calPost(url){
-  await fetch(url, {method:"POST", headers:{"Content-Type":"application/json"},
-                    body: JSON.stringify({cls: calCls})});
-  calRefresh();
-}
-async function setfit(){
-  await fetch("/api/cal/fitparams", {method:"POST",
-    headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({margin:+$("f-margin").value, sep:+$("f-sep").value,
-                          pct:+$("f-pct").value})});
-}
-async function setdist(){
-  await fetch("/api/cal/dist", {method:"POST",
-    headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({d:+$("c-dist").value})});
-}
-async function dofit(){
-  const r = await (await fetch("/api/cal/fit", {method:"POST"})).json();
-  $("cal-msg").innerHTML = `<span class="${r.ok?"ok":"bad"}">${r.msg}</span>`;
-  builtParams = false;
-  calRefresh();
-}
-async function calRefresh(){
-  if (tab !== "cal") return;
-  try {
-    const r = await (await fetch("/api/cal/state")).json();
-    $("cal-stats").innerHTML =
-      `<tr><th>class</th><th>n</th><th>mean L a b</th></tr>` +
-      r.classes.map(c => `<tr><td>${c.name}</td><td>${c.n}</td>`
-        + `<td class="v">${c.mean ? c.mean.join("  ") : "—"}</td></tr>`).join("");
-    $("cal-space").textContent = r.space
-      ? `— classifying in ${r.space}, min area ${r.min_area}` : "— no frame yet";
-    $("cal-det").innerHTML = r.blobs.length
-      ? `<tr><th>colour</th><th>area</th><th>verdict</th></tr>` +
-        r.blobs.map(b => `<tr><td>${b.colour}</td><td>${b.area}</td><td>`
-          + (b.verdict === "ACCEPTED" ? `<span class="ok">ACCEPTED</span>`
-             : `<span class="bad">${b.verdict}</span>`) + `</td></tr>`).join("")
-      : `<tr><td class="dim">nothing above the minimum area</td></tr>`;
-    $("cal-vals").innerHTML = r.vals.map(v =>
-      `<tr><td class="k">${v[0]}</td><td class="v">${v[1]}</td></tr>`).join("");
-    $("f-margin").value = r.fit.margin;
-    $("f-sep").value = r.fit.sep;
-    $("f-pct").value = r.fit.pct;
-  } catch(e){}
+function renderRun(d){
+  runData=d;
+  const t=d.tick,tm=t&&t.telem,st=t&&t.status,ss=d.session;
+  renderPills(d,t,tm,ss); renderRunControls(d,t,tm,ss); renderCamLidar(d,t,ss);
+  renderFsm(d,t,tm,st,ss); renderSup(d,t,tm,ss); renderFields(d,t,tm,st,ss);
+  appendConsole(d.log.lines);
 }
 
-/* ---------------- poll ---------------- */
-async function tick(){
-  try {
-    const d = await (await fetch("/api/state?since=" + logIdx)).json();
-    paintRun(d);
-    if (d.log && d.log.lines.length){
-      const pre = $("log");
-      const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 6;
-      pre.textContent += d.log.lines.map(l => l[2]).join("\n") + "\n";
-      logIdx = d.log.last;
-      if (atBottom) pre.scrollTop = pre.scrollHeight;
+/* ---------------- header pills ---------------- */
+function pill(id,on,text){$(id).className="dot "+(on===null?"":on?"on":"off");$(id+"-t").textContent=text;}
+function renderPills(d,t,tm,ss){
+  pill("r-cam",d.camera_ok,d.camera_ok?`Camera ${d.vision_fps} fps`:"Camera down");
+  const ll=t?t.lidar_live:d.lidar.ok;
+  pill("r-lidar",ll&&d.lidar.thread_alive,!d.lidar.thread_alive?"Lidar thread dead":ll?"Lidar live":"Lidar stale");
+  if(!ss||!ss.active) pill("r-link",null,"STM32 link —");
+  else if(ss.dry) pill("r-link",null,"STM32: --dry");
+  else pill("r-link",t&&t.link_state==="ok",t&&t.link_state==="ok"?"STM32 link ok":"STM32 link STALE");
+  if(d.busy==="rebooting") pill("r-sess",null,"Rebooting STM32");
+  else if(ss&&ss.active) pill("r-sess",true,`Session ${ss.dry?"(dry) ":""}${Math.floor(ss.elapsed_s/60)}:${String(Math.floor(ss.elapsed_s%60)).padStart(2,"0")}`);
+  else pill("r-sess",null,"No session");
+}
+
+/* ---------------- controls ---------------- */
+function msg(text,kind="info"){lastMsg={text,kind,t:Date.now()};}
+async function post(url,body){
+  try{const r=await(await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body||{})})).json();
+    if(!r.ok) msg(r.error||"failed","err"); return r.ok;}catch(e){msg("request failed: "+e,"err");return false;}
+}
+$("b-start").onclick=async()=>{ $("b-start").disabled=true; prevStm=null; stmHist=[]; hotEdge=null;
+  if(await post("/api/run/start",{dry:$("o-dry").checked,no_avoid:$("o-noavoid").checked,port:$("o-port").value.trim()}))
+    msg($("o-dry").checked?"Dry session started: no serial port, STM32 faked as HEADING (as the CLI --dry).":"Session started: the car leaves BOOT 5 s after the Pi's HELLO (lidar + camera up).","ok"); };
+/* Stop / Rerun: while held, the "Holding CMD …" line shows; errors show as messages */
+$("b-stop").onclick=async()=>{ lastMsg.text=""; await post("/api/run/stop_car"); };
+$("b-rerun").onclick=async()=>{ lastMsg.text=""; await post("/api/run/rerun"); };
+$("b-end").onclick=async()=>{ $("b-end").disabled=true; msg("Ending: STOP first, then the loop stops and the port is released…","info");
+  if(await post("/api/run/end")) msg("Session ended. The car was left STOPPED: next Start, then Rerun (or Reboot) to drive again.","ok"); };
+$("b-reboot").onclick=async()=>{
+  if(Date.now()>rebootArm){ rebootArm=Date.now()+3000; $("b-reboot").textContent="Confirm reboot"; $("b-reboot").classList.add("confirm");
+    setTimeout(()=>{ if(Date.now()>=rebootArm){ $("b-reboot").textContent="Reboot STM32"; $("b-reboot").classList.remove("confirm"); } },3100); return; }
+  rebootArm=0; $("b-reboot").textContent="Reboot STM32"; $("b-reboot").classList.remove("confirm");
+  if(await post("/api/run/reboot",{port:$("o-port").value.trim()})) msg("Rebooting…","info"); };
+$("o-port").addEventListener("input",()=>portTouched=true);
+
+/* Speed slider: debounced POST while dragging. speedHoldUntil keeps the poll
+   from snapping the knob back to a slightly stale ss.speed for a moment after
+   the last drag, until the POST and one status cycle have caught up. */
+let speedPending=null, speedHoldUntil=0;
+$("o-speed").addEventListener("input",e=>{
+  $("o-speed-v").textContent=e.target.value;
+  speedHoldUntil=Date.now()+600;
+  clearTimeout(speedPending);
+  speedPending=setTimeout(()=>post("/api/run/speed",{speed:+e.target.value}),80);
+});
+
+function renderRunControls(d,t,tm,ss){
+  const active=!!(ss&&ss.active), busy=!!d.busy, dry=active&&ss.dry;
+  const fresh=tm&&tm.age_s<0.5, parked=fresh&&(tm.state_name==="FINISH"||tm.state_name==="STOPPED");
+  if(!portTouched&&!$("o-port").value) $("o-port").value=d.default_port;
+  if(active){ $("o-port").value=ss.port; $("o-dry").checked=ss.dry; $("o-noavoid").checked=ss.no_avoid; }
+  ["o-port","o-dry","o-noavoid"].forEach(id=>$(id).disabled=active||busy);
+  $("b-start").disabled=active||busy;
+  $("b-stop").disabled=!active||dry||busy||parked;
+  $("b-rerun").disabled=!active||dry||busy||!parked||(ss&&ss.pending_cmd!=="NONE");
+  $("b-end").disabled=!active||busy;
+  $("b-reboot").disabled=busy;
+  // speed slider: usable on a live non-dry session; the knob follows ss.speed
+  // except right after a drag (speedHoldUntil), and its ends follow the
+  // firmware's clamp band reported in ss.
+  const sp=$("o-speed");
+  sp.disabled=!(active&&!dry&&!busy);
+  if(active&&ss.speed!=null){
+    if(+sp.min!==ss.speed_min) sp.min=ss.speed_min;
+    if(+sp.max!==ss.speed_max) sp.max=ss.speed_max;
+    if(Date.now()>speedHoldUntil){ sp.value=ss.speed; $("o-speed-v").textContent=ss.speed; }
+  } else if(!active){ $("o-speed-v").textContent="—"; }
+  // message line: pending command > reboot progress > last action > hints
+  let html="";
+  const rb=d.reboot;
+  if(active&&ss.pending_cmd!=="NONE") html=`<div class="alert info">Holding <b>CMD ${ss.pending_cmd}</b> in every frame until the STM32 acknowledges it (${ss.pending_cmd==="STOP"?"STOPPED":"BOOT"}); gives up after ${ss.cfg.cmd_timeout_s} s.</div>`;
+  else if(rb&&rb.phase!=="idle"&&(busy||Date.now()/1000-rb.t<20))
+    html=`<div class="alert ${rb.phase==="failed"?"err":rb.phase==="done"?"info":"warn"}">Reboot · ${esc(rb.phase)} — ${esc(rb.message)}</div>`;
+  else if(lastMsg.text&&Date.now()-lastMsg.t<12000)
+    html=`<div class="alert ${lastMsg.kind==="err"?"err":lastMsg.kind==="ok"?"info":"info"}">${esc(lastMsg.text)}</div>`;
+  else if(active&&parked&&!dry) html=`<div class="alert info">The car is in ${tm.state_name}. <b>Rerun</b> sends it back to BOOT (HELLO, 5 s countdown, finish line re-measured at GO).</div>`;
+  else if(active&&ss.error) html=`<div class="alert err">${esc(ss.error)}</div>`;
+  else if(d.stream_busy&&!active) html=`<div class="alert warn">The open-round stream (calibration tab) holds /dev/ttyACM0 — stop it before starting a run.</div>`;
+  $("ctl-msg").innerHTML=html;
+  // the CLI's banner line
+  if(ss){const c=ss.cfg;
+    $("banner").textContent=`[lap] obstacle lap. send=${c.send_hz} Hz  tol=+/-${c.tol} deg  d_clear=${Math.round(c.d_clear)} mm  engage=${c.engage}  freeze=${c.freeze}  link=${ss.dry?"DRY":ss.port}${ss.no_avoid?"  AVOIDANCE DISABLED":""}  ·  config.json read at ${new Date(ss.started_at*1000).toLocaleTimeString()}${active?"":" (session ended)"}`;}
+  else $("banner").textContent="Start reads config.json from disk, exactly like the CLI: unsaved calibration-slider changes are not used.";
+}
+
+/* ---------------- camera + lidar column ---------------- */
+function renderCamLidar(d,t,ss){
+  const run=!!(ss&&ss.active);
+  const ff=d.floor_filter, rj=d.vision_rejected||[];
+  const rjs=rj.length?` · rejected ${rj.length}: `+Object.entries(rj.reduce((a,b)=>{const k=b.reason.startsWith("not linked")?"wall between":"not on floor";a[k]=(a[k]||0)+1;return a;},{})).map(([k,n])=>`${k} ×${n}`).join(", "):"";
+  $("cam-meta").textContent=(d.camera_ok?`vision ${d.vision_fps} fps`:`camera: ${d.camera_error||"no frames"}`)+
+    (d.vision_error?` · ${d.vision_error}`:"")+
+    (ff.enabled?` · floor filter S≤${ff.white_s_max} V≥${ff.white_v_min}${ff.linked?" +link":""}`:" · floor filter OFF")+rjs+
+    (run?"":" · preview (saved config)");
+  $("cam-meta").title=$("cam-meta").textContent;
+  const L=d.lidar;
+  $("lid-meta").textContent=!L.thread_alive?"lidar thread not running":L.stats?`${L.stats.valid_count}/${L.stats.total} bins · ${L.stats.age_s}s old`:"no lidar data";
+  $("rl-front").textContent=mm(L.front_mm);
+  $("rl-valid").textContent=L.stats?`${L.stats.valid_count}/${L.stats.total}`:"—";
+  $("rl-age").textContent=L.stats?`${L.stats.age_s} s`:"—";
+  $("rl-tol").textContent=L.tol;
+  const fp=p=>p?`${p.mm} mm · q${p.q} @${p.deg}°`:"no return";
+  const picks=t&&run?t.picks:[L.picks.deg0,L.picks.deg90,L.picks.deg270];
+  $("rl-p0").textContent=fp(picks[0]);$("rl-p90").textContent=fp(picks[1]);$("rl-p270").textContent=fp(picks[2]);
+  $("rl-rev").textContent=t&&run?`${t.rev_per_s} · q${t.queue_depth}`:"—";
+  const F=d.fusion; $("rl-fus").textContent=`±${F.bearing_match_deg}° · ${F.range_floor_mm} · ${F.gap_split_mm}`;
+  $("rl-fsrc").textContent=run?"as read at Start":"saved config.json";
+  const rd={ranges:L.ranges,qualities:L.qualities,radar_max_mm:d.radar_max_mm,windows:d.windows};
+  drawRawOn($("run-radar-raw"),rd);
+  const g=drawRadarOn($("run-radar"),rd), ctx=$("run-radar").getContext("2d");
+  // F/L/R picks actually sent
+  const pts=[[0,picks[0]],[90,picks[1]],[270,picks[2]]];
+  ctx.fillStyle="#EF6C1A";
+  pts.forEach(([deg,p])=>{ if(!p)return; const [x,y]=polar(g,p.deg,Math.min(p.mm,d.radar_max_mm)); ctx.fillRect(x-3,y-3,6,6); });
+  // lane heading (thin) and the solved heading (dashed), relative to the car's current heading
+  if(t&&run&&t.telem){
+    const hd=t.telem.heading_deg, st=t.status;
+    if(st&&["HEADING","AVOID","TURN90"].includes(st.state_name)){
+      const rel=wrap180(st.lane_heading_deg-hd), [x,y]=polar(g,rel,d.radar_max_mm*0.95);
+      ctx.strokeStyle="#2A3A63";ctx.lineWidth=1;ctx.setLineDash([2,3]);ctx.beginPath();ctx.moveTo(g.cx,g.cy);ctx.lineTo(x,y);ctx.stroke();ctx.setLineDash([]);
     }
-  } catch(e){
-    $("state").textContent = "Pi not reachable";
+    if(t.action!==0&&t.heading!=null){
+      const rel=wrap180(t.heading-hd), [x,y]=polar(g,rel,Math.min(t.leg||0,d.radar_max_mm));
+      ctx.strokeStyle="#EF6C1A";ctx.lineWidth=2.5;ctx.setLineDash([6,4]);ctx.beginPath();ctx.moveTo(g.cx,g.cy);ctx.lineTo(x,y);ctx.stroke();ctx.setLineDash([]);
+    }
   }
-  setTimeout(tick, 200);
+  renderWindowsInto($("run-windows"),d,"rstrip-",F.range_floor_mm,d.near_idx,
+    t&&t.action===1?"tracked by the supervisor (TRACK)":"supervisor's nearest candidate");
 }
-setTab(tab);
-tick();
-setInterval(calRefresh, 800);
+
+/* ---------------- STM32 FSM ---------------- */
+const EDGE={"BOOT>HEADING":"e-boot-head","HEADING>AVOID":"e-head-avoid","AVOID>HEADING":"e-avoid-head",
+  "HEADING>TURN90":"e-head-turn","TURN90>HEADING":"e-turn-head","HEADING>FINISH":"e-head-fin",
+  "FINISH>BOOT":"e-fin-boot","STOPPED>BOOT":"e-stop-boot"};
+function edgeFor(a,b){ if(b==="STOPPED")return"e-stop"; if(a==="RECOVER"||b==="RECOVER")return"e-recover"; return EDGE[a+">"+b]||null; }
+function nodeSub(name,tm,st){
+  if(!st) return name===tm.state_name?"(no STATUS)":"";
+  switch(name){
+    case"BOOT": return !st.fsm_started?"waiting for Pi":!st.boot_ready?"waiting HELLO":`GO in ${secs(st.countdown_ms)}`;
+    case"HEADING": return st.lidar_hold?"PARKED: lidar":`${st.straight_mm} mm`;
+    case"AVOID": return `${st.p_action===2?"COMMIT":st.p_action===1?"TRACK":"release"} ${st.phase_mm}/${st.avoid_leg_mm}`;
+    case"TURN90": return `err ${sg(wrap180(st.target_heading_deg-tm.heading_deg))}°`;
+    case"FINISH": return ["","by wall","by odo","STOP cmd"][st.finish_reason]||"";
+    case"STOPPED": return st.rerun_armed?"RERUN armed":"halted";
+    case"RECOVER": return `try ${st.recover_tries+1}/${FW.REC_TRIES}`;
+  }return"";
+}
+function renderFsm(d,t,tm,st,ss){
+  const cur=tm?tm.state_name:null, fresh=tm&&tm.age_s<0.5&&ss&&ss.active&&!ss.dry;
+  STN.forEach(n=>{const g=$("n-"+n);g.classList.toggle("cur",n===cur&&!!(ss&&!ss.dry));g.classList.toggle("stale",!fresh);
+    $("s-"+n).textContent=(tm&&n===cur&&ss&&!ss.dry)?nodeSub(n,tm,st):"";});
+  document.querySelectorAll("#fsm-svg .edge").forEach(e=>e.classList.toggle("hot",e.id===hotEdge&&d.now*1000<hotUntil));
+  const srvNow=d.now*1000;
+  $("fsm-hist").innerHTML=stmHist.length?"Recent: "+stmHist.map(h=>`<b>${h.a}→${h.b}</b> ${((srvNow-h.t)/1000).toFixed(1)} s ago`).join(" · "):"Recent transitions appear here.";
+  $("fsm-meta").textContent=!ss?"no session yet":ss.dry?"--dry: no STM32":st?`in state ${secs(st.state_ms)} · run #${st.run_number} · ${st.percept_frames} frames rx`:tm?`TELEM only · corner ${tm.corner_count}`:"—";
+  $("fsm-now").innerHTML=describeStm32(d,t,tm,st,ss);
+}
+
+function describeStm32(d,t,tm,st,ss){
+  if(!ss) return `<div class="now-title"><span class="st">No session</span></div><p class="lead">Press <b>Start</b> to run obstacle_lap's loop here. The STM32 stays in BOOT until the Pi's first PERCEPT frame carries HELLO (lidar and camera both live), then counts down 5 s and drives.</p>`;
+  if(ss.dry) return `<div class="now-title"><span class="st">--dry</span><span class="ph">no STM32</span></div><p class="lead">No serial port is open. As in the CLI's --dry, the supervisor is fed a fake telemetry saying the car is in HEADING, so the avoidance solve runs on the bench; nothing is sent. The Pi-side supervisor below is live.</p>`;
+  let pre="";
+  if(!ss.active) pre+=`<div class="alert warn">Session ended${ss.ended_by==="reboot"?" by the STM32 reboot":""} ${ss.ended_at?new Date(ss.ended_at*1000).toLocaleTimeString():""} — showing the last state the STM32 reported.</div>`;
+  if(!tm||tm.stamp===0) return pre+`<div class="now-title"><span class="st">Waiting for TELEM</span></div><p class="lead">The port is open but no TELEM frame has arrived yet. The STM32 sends TELEM at 50 Hz from power-up, so silence means the wrong port, firmware without this link, or a board still booting.</p>`;
+  if(ss.active&&tm.age_s>0.5) pre+=`<div class="alert err">TELEM is ${fmtAge(tm.age_s)} old — the STM32 is not reporting (unplugged, rebooting, crashed, or wrong port). Everything below is the last known state.</div>`;
+  if(!st) return pre+describeTelemOnly(tm);
+  const S=st.state_name, hd=tm.heading_deg, err=wrap180(st.target_heading_deg-hd);
+  let title=S, phase="", lead="", rows="", foot="";
+  const ctrl=`servo ${servoText(st.servo_deg)} · PWM ${st.motor_pwm}`;
+  if(S==="BOOT"){
+    if(!st.fsm_started){ phase="waiting for the Pi";
+      lead="Powered and sending TELEM, but no PERCEPT frame has arrived yet (LED1 slow blink). The Pi only sends while its lidar is live.";
+      rows+=nrow(t&&t.lidar_live?"ok":"block","Pi lidar live",t&&t.lidar_live?"yes — frames going out":"no — the Pi stays silent");
+    }else if(!st.boot_ready){ phase="waiting for HELLO";
+      lead="Frames are arriving. The car will not start until the Pi's frame says lidar AND camera are both up (HELLO), or after 15 s of lidar-only frames (it then runs blind to pillars).";
+      rows+=nrow(st.p_hello?"fire":"wait","HELLO in last frame",st.p_hello?"yes":"no"+(t?` (Pi: ${t.hello_sent?"sent":"waiting for lidar + camera"})`:""));
+      rows+=nrow(st.p_lidar_ok?"ok":"wait","LIDAR_OK · CAM_OK",`${st.p_lidar_ok?"yes":"no"} · ${st.p_cam_ok?"yes":"no"}`);
+      rows+=nrow(st.p_lidar_ok?"wait":"info","Camera grace",st.p_lidar_ok?`${secs(st.grace_ms)} left ${nbar(1-st.grace_ms/FW.GRACE)}`:"counts only while LIDAR_OK");
+    }else{ phase=`countdown · GO in ${secs(st.countdown_ms)}`;
+      lead=`The Pi is ready. In ${secs(st.countdown_ms)} the car starts: it takes its current heading (${sg(hd)}°) as the lane heading and the current front distance as the finish line (LED1 fast blink).`;
+      rows+=nrow("wait","Start delay",`${secs(st.countdown_ms)} left ${nbar(1-st.countdown_ms/FW.START_DELAY)}`);
+      rows+=nrow(st.p_cam_ok?"ok":"warn","Camera at GO",st.p_cam_ok?"up":"DOWN — the lap will run blind to pillars");
+      rows+=nrow("info","Finish line (front now)",mm(tm.front_mm));
+    }
+    rows+=nrow("info","Run",st.run_number?`${st.run_number} run(s) since power-up; RERUN re-entered BOOT (resetRun: direction, corners, lockouts cleared; yaw not re-zeroed)`:"first run since power-up");
+  }
+  else if(S==="HEADING"){
+    phase=st.lidar_hold?"PARKED · lidar dead":`straight · corner ${tm.corner_count}/${FW.CORNERS}`;
+    lead=st.lidar_hold?`Lidar dead (no LIDAR_OK frame for over ${FW.LIDAR_DEAD} ms): motor off. The straight restarts from scratch when the lidar returns.`
+      :`Driving the straight at PWM ${st.motor_pwm} (base speed, set live from the Speed slider; default ${FW.BASE}), holding lane heading ${sg(st.lane_heading_deg)}° with the heading PID: now ${sg(hd)}°, error ${sg(err)}°, ${ctrl}.`;
+    rows+=nsec("Checked every pass, in this order");
+    const act=st.p_action;
+    rows+=nrow(act&&!st.link_stale?"fire":st.link_stale?"block":"wait","1 · Pillar from Pi",act?(st.link_stale?"manoeuvre ignored: link stale":`${act===2?"COMMIT":"TRACK"} received → AVOID`):`none · Pi: ${esc(t?t.note:"—")}`);
+    if(tm.corner_count>=FW.CORNERS){
+      const F=tm.front_mm,S0=st.front_at_start_mm,byWall=S0!=null&&F!=null&&!tm.lidar_stale&&st.segment_mm>100&&F<=S0+FW.FIN_TOL;
+      rows+=nrow(byWall?"fire":"wait","2 · Finish by wall",`front ${mm(F)} ≤ start ${mm(S0)} + ${FW.FIN_TOL}`);
+      rows+=nrow(st.segment_mm>=st.finish_target_mm?"fire":"wait","2 · Finish by odo",`${st.segment_mm} / ${st.finish_target_mm} mm ${nbar(st.segment_mm/Math.max(1,st.finish_target_mm))}`);
+      foot="12 corners done: only the run-out is left; corner triggers are no longer checked.";
+    }else{
+      rows+=nrow("info","2 · Finish check",`after corner ${FW.CORNERS} (${FW.CORNERS-tm.corner_count} to go)`);
+      rows+=nrow(tm.lidar_dead?"block":"ok","3 · Lidar alive",tm.lidar_dead?"dead → park":"yes");
+      rows+=nrow(st.straight_mm>=FW.SAFETY?"fire":"wait","4 · Safety distance",`${st.straight_mm} / ${FW.SAFETY} mm ${nbar(st.straight_mm/FW.SAFETY)}`);
+      rows+=nrow(st.corner_lockout_mm>0?"block":"ok","5 · Post-corner lockout",st.corner_lockout_mm>0?`${st.corner_lockout_mm} mm of ${FW.CORNER_LOCK} left`:"clear");
+      rows+=nrow(st.avoid_lockout_mm>0?"block":"ok","5 · Post-avoid lockout",st.avoid_lockout_mm>0?`${st.avoid_lockout_mm} mm of ${FW.AVOID_LOCK} left`:"clear");
+      if(tm.lidar_stale) rows+=nrow("block","6 · Side-open count","lidar stale: counts reset");
+      else if(!tm.dir_locked){
+        const side=(n,mmv,revs,seen,real)=>{const fire=revs>=FW.REVS&&seen&&(real||!st.lock_needs_real);
+          return nrow(fire?"fire":"wait",`6 · ${n} side`,`${mm(mmv)} · open ${revs}/${FW.REVS} revs · wall seen ${seen?"yes":"no"}${st.lock_needs_real?` · real ${real?"yes":"no"}`:""} ${nbar(revs/FW.REVS)}`);};
+        rows+=side("Left",st.lidar_l_mm,st.open_revs_l,st.wall_seen_l,st.real_open_l);
+        rows+=side("Right",st.lidar_r_mm,st.open_revs_r,st.wall_seen_r,st.real_open_r);
+        foot=`Direction not locked yet: both sides are watched. The first side to read over ${FW.SIDE_OPEN} mm for ${FW.REVS} lidar revolutions (after showing a wall once this run) is the inner side: right → CLOCKWISE, left → COUNTER-CW. That trigger is also corner 1. Both at once locks nothing.`;
+      }else{
+        const cw=tm.clockwise,v=cw?st.lidar_r_mm:st.lidar_l_mm,r=cw?st.open_revs_r:st.open_revs_l;
+        rows+=nrow(r>=FW.REVS?"fire":"wait",`6 · Turn side (${cw?"right, CW":"left, CCW"})`,`${mm(v)} · open ${r}/${FW.REVS} revs over ${FW.SIDE_OPEN} ${nbar(r/FW.REVS)}`);
+        foot=`Direction locked ${cw?"CLOCKWISE":"COUNTER-CLOCKWISE"} (LED${cw?2:3}). Corner beats pillar: missing a pillar costs points, missing a corner ends the run.`;
+      }
+    }
+  }
+  else if(S==="AVOID"){
+    const green=st.p_green, a=st.p_action;
+    phase=`${green?"GREEN · pass on its left":"RED · pass on its right"} · ${a===2?"COMMIT":a===1?"TRACK":"released"}`;
+    lead=`Threading a pillar: holding the Pi-solved absolute heading ${sg(st.target_heading_deg)}° (now ${sg(hd)}°, error ${sg(err)}°) at PWM ${st.motor_pwm} (avoid speed — a fixed fraction of the base speed; default ${FW.AVOID_PWM}), ${servoText(st.servo_deg)}.`;
+    if(a===1) rows+=nrow(st.link_stale?"warn":"info","Mode TRACK",st.link_stale?"link stale: re-basing stopped, the leg now expires on its own distance":"each fresh frame resets the heading and re-bases the leg, so it cannot expire while TRACK lasts");
+    else if(a===2) rows+=nrow("info","Mode COMMIT","frozen: the leg runs out on odometry, even with the pillar out of view");
+    else rows+=nrow("fire","Pi sent NONE","avoid released → HEADING");
+    rows+=nrow(st.phase_mm>=st.avoid_leg_mm?"fire":"wait","Leg",`${st.phase_mm} / ${st.avoid_leg_mm} mm ${nbar(st.phase_mm/Math.max(1,st.avoid_leg_mm))} (TELEM: ${mm(tm.avoid_remaining_mm)} left)`);
+    rows+=nrow(st.phase_mm>=FW.AVOID_CAP?"fire":"wait","Backstop: distance cap",`${st.phase_mm} / ${FW.AVOID_CAP} mm ${nbar(st.phase_mm/FW.AVOID_CAP)}`);
+    rows+=nrow(st.avoid_ms>=FW.AVOID_TO?"fire":"wait","Backstop: timeout",`${secs(st.avoid_ms)} / 5.0 s ${nbar(st.avoid_ms/FW.AVOID_TO)}`);
+    foot=`On exit: HEADING with a ${FW.AVOID_LOCK} mm post-avoid lockout, but the locked side's open-revolution count survives the avoid (it is not re-zeroed on this particular entry) — so a corner right after a pillar is not missed. Corners are not watched while yawed; one that opens now is counted when HEADING resumes.`;
+  }
+  else if(S==="TURN90"){
+    const cw=tm.clockwise; phase=`corner ${tm.corner_count}/${FW.CORNERS} · ${cw?"right":"left"}`;
+    lead=`Eased ${cw?"right (clockwise)":"left (counter-clockwise)"} 90° arc from lane ${sg(st.lane_heading_deg)}° to ${sg(st.target_heading_deg)}°. Steering and PWM both shrink as the heading error closes.`;
+    rows+=nrow(Math.abs(err)<FW.TURN_STOP?"fire":"wait","Heading error",`${sg(err)}° (ends under ${FW.TURN_STOP}°) ${nbar(1-Math.abs(err)/90)}`);
+    rows+=nrow("info","Steering · PWM",ctrl);
+    rows+=nrow(st.phase_mm>=FW.TURN_CAP?"fire":"wait","Backstop: arc length",`${st.phase_mm} / ${FW.TURN_CAP} mm ${nbar(st.phase_mm/FW.TURN_CAP)}`);
+    foot=`Then: lane heading ← ${sg(st.target_heading_deg)}°, encoder zeroed (new segment origin), HEADING with a ${FW.CORNER_LOCK} mm corner lockout.`;
+  }
+  else if(S==="RECOVER"){
+    phase=`try ${st.recover_tries+1} of ${FW.REC_TRIES} · returns to ${STN[st.recover_return_state]||"?"}`;
+    lead=`Wall panic: the front beam read ≤ ${FW.PANIC} mm. Reversing at PWM ${FW.REC_PWM} with mirrored steering, so the car keeps rotating the way it was turning (${servoText(st.servo_deg)}).`;
+    rows+=nrow(!tm.lidar_stale&&tm.front_mm!=null&&tm.front_mm>=FW.CLEAR?"fire":"wait","Front clear",`${mm(tm.front_mm)} / ${FW.CLEAR} mm ${nbar((tm.front_mm||0)/FW.CLEAR)}`);
+    rows+=nrow(st.phase_mm>=FW.REC_MAX?"fire":"wait","Backed (cap)",`${st.phase_mm} / ${FW.REC_MAX} mm ${nbar(st.phase_mm/FW.REC_MAX)}`);
+    rows+=nrow(st.recover_tries>=FW.REC_TRIES-1?"warn":"info","Capped tries",`${st.recover_tries} / ${FW.REC_TRIES} — after ${FW.REC_TRIES} capped tries the overlay is off for the run`);
+    foot=`Colour muting is gone in this firmware; RECOVER returns to ${STN[st.recover_return_state]||"?"} exactly where it left off.`;
+  }
+  else if(S==="FINISH"||S==="STOPPED"){
+    const fin=S==="FINISH";
+    phase=fin?`${tm.corner_count} corners · by ${["?","wall","odo","STOP command"][st.finish_reason]}`:"halted by the Pi";
+    lead=fin?`Lap complete. Motor off, steering centred, all three LEDs solid. ${st.finish_reason===1?"Finished by the front-wall match (the geometric test).":st.finish_reason===2?"Finished by the odometry fallback: the front beam was invalid at GO or at the end — worth checking.":""}`
+             :`Stopped by CMD STOP (Stop car / End session). Motor off, steering centred, LED1 off, LED2/LED3 alternating.`;
+    rows+=nrow(st.link_stale?"block":st.rerun_armed?"ok":"wait","Rerun",st.link_stale?"link stale: RERUN needs live frames":st.rerun_armed?"armed — press Rerun":"needs a 0→1 edge: waiting for one non-RERUN frame");
+    rows+=nrow("info","Reboot","also leaves this state, and re-zeroes the yaw");
+    rows+=nrow("info","Run",`#${st.run_number} since power-up`);
+  }
+  rows+=nsec("Link, as the STM32 sees it");
+  rows+=nrow(st.link_age_ms==null?"wait":st.link_stale?"block":"ok","Last PERCEPT",st.link_age_ms==null?"never":`${st.link_age_ms} ms ago (stale over ${FW.LINK_STALE}) · ${st.percept_frames} frames`);
+  rows+=nrow(st.lidar_age_ms==null?"wait":tm.lidar_dead?"block":tm.lidar_stale?"warn":"ok","Last LIDAR_OK frame",st.lidar_age_ms==null?"never":`${st.lidar_age_ms} ms ago (stale ${FW.LIDAR_STALE}, dead ${FW.LIDAR_DEAD})`);
+  rows+=nrow(st.p_cmd?"info":"info","CMD byte seen",`${["NONE","RERUN","STOP","REBOOT"][st.p_cmd]||st.p_cmd} ×${st.p_cmd_run}${st.p_cmd>=2?` (acts at ${FW.CONFIRM})`:""}`);
+  return pre+`<div class="now-title"><span class="st">${title}</span><span class="ph">${esc(phase)}</span><span class="tm num">for ${secs(st.state_ms)}</span></div>`+
+    `<p class="lead">${lead}</p>${rows}${foot?`<p class="note">${foot}</p>`:""}`;
+}
+function describeTelemOnly(tm){
+  const D={BOOT:"Waiting for the Pi's HELLO, then a 5 s countdown.",HEADING:"Holding the lane heading; watching for a pillar manoeuvre, a corner and the finish.",
+    AVOID:"Holding the heading the Pi solved, for the leg it asked for.",TURN90:"Eased 90° arc, ended on IMU heading.",FINISH:"Lap complete, stopped.",
+    RECOVER:"Wall panic: backing off, then resuming.",STOPPED:"Stopped by CMD STOP."};
+  return `<div class="alert warn">No STATUS frames: this STM32 runs firmware without the STATUS frame, so only TELEM is available. Flash the updated ObstacleLap.cpp for the full breakdown.</div>`+
+    `<div class="now-title"><span class="st">${tm.state_name}</span><span class="ph">corner ${tm.corner_count}/12</span></div><p class="lead">${D[tm.state_name]||""}</p>`+
+    nrow("info","Heading · speed",`${sg(tm.heading_deg)}° · ${Math.round(tm.speed_mmps)} mm/s`)+
+    nrow("info","Direction",tm.dir_locked?(tm.clockwise?"locked CW":"locked CCW"):"not locked")+
+    nrow(tm.lidar_dead?"block":tm.lidar_stale?"warn":"ok","Lidar",tm.lidar_dead?"dead":tm.lidar_stale?"stale":"fresh");
+}
+
+/* ---------------- Pi supervisor ---------------- */
+function supPhase(t,ss){
+  if(ss&&ss.no_avoid) return"DISABLED";
+  if(t.note==="stm32 busy") return"PAUSED";
+  if(t.action===2) return"COMMIT";
+  if(t.action===1) return"TRACK";
+  if(t.note==="refractory") return"REFRACTORY";
+  if(/^confirming/.test(t.note)) return"CONFIRMING";
+  return"IDLE";
+}
+function idleWhy(n){
+  if(n==="no pillar") return"no RED/GREEN obstacle with a real range inside the engage range and bearing cone";
+  if(/^already clear/.test(n)) return"the pillar is already outside the keep-out cone on its legal side — no steering needed";
+  if(/beyond engage/.test(n)) return"the pillar axis is beyond the engage range";
+  if(n==="no usable range") return"no lidar range at the pillar's bearing, or nearer than min_range (the chassis)";
+  if(/outside the working cone/.test(n)) return"the pillar bearing is outside ±max_bearing";
+  if(n==="no room on the legal side") return"wall guard: not enough room between the pillar and the wall — holding the lane (a penalty beats a crash)";
+  if(n==="leg complete") return"the committed leg ran out on odometry";
+  if(n==="leg timed out") return"the committed leg took over 5 s — dropped";
+  return n;
+}
+function renderSup(d,t,tm,ss){
+  ["IDLE","CONFIRMING","TRACK","COMMIT","REFRACTORY","PAUSED","DISABLED"].forEach(n=>$("sc-"+n).classList.remove("cur"));
+  if(!t){$("sup-meta").textContent="no session";$("sup-now").innerHTML=`<p class="note">Runs inside obstacle_lap's loop at 50 Hz once a session starts.</p>`;return;}
+  const ph=supPhase(t,ss); $("sc-"+ph).classList.add("cur");
+  const s=t.sup,c=ss.cfg,near=t.near;
+  $("sup-meta").textContent=`engage ${c.engage} · freeze ${c.freeze} · cone ±${c.max_bearing}° · d_clear ${Math.round(c.d_clear)} mm`;
+  let lead="",rows="";
+  if(ph==="DISABLED") lead="--no-avoid: perception only. Every frame carries action NONE, so the car runs a plain open lap.";
+  else if(ph==="PAUSED") lead=`The STM32 is in ${tm.state_name}, which must not be interrupted: every frame carries action NONE. A manoeuvre that was running when this began was dropped, and re-arming then waits out a ${s.refractory_mm} mm refractory.`;
+  else if(ph==="IDLE") lead=`Looking for the nearest RED/GREEN with a real range within ${c.engage} mm and ±${c.max_bearing}°. Now: ${esc(idleWhy(t.note))}.`;
+  else if(ph==="CONFIRMING") lead=`Pillar seen and a manoeuvre solved, confirming ${s.confirm}/${s.confirm_ticks} ticks: one frame of a mis-classified colour must not start a manoeuvre.`;
+  else if(ph==="TRACK") lead=`Re-solving every tick and sending TRACK: hold ${sg(s.heading_abs)}° for ${Math.round(s.leg_mm)} mm (the STM32 re-bases the leg on every frame). Freezes to COMMIT at r_axis ≤ ${c.freeze} mm, or after ${s.lost_grace} missed detections (now ${s.lost}).`;
+  else if(ph==="COMMIT") lead=`Frozen: hold ${sg(s.heading_abs)}°; ${s.commit_left_mm} mm of the ${Math.round(s.leg_mm)} mm leg left (odometry from TELEM). Perception is not consulted. Gives up after ${s.commit_timeout_s} s (${s.commit_age_s} s so far).`;
+  else if(ph==="REFRACTORY") lead=`Just finished a pass: re-arming is blocked for ${s.refractory_left_mm} mm more odometry (refractory ${s.refractory_mm} mm), so the pillar just passed cannot re-trigger.`;
+  rows+=nrow(near?"info":"wait","Nearest candidate",near?`${near.color} @ ${sg(near.bearing_deg)}° · ${mm(near.distance_mm)} · r_axis ${near.distance_mm!=null?Math.round(near.distance_mm+c.pillar_half_width)+" mm":"—"}`:"none in range/cone");
+  rows+=nrow("info","Solver note",esc(t.note||"—"));
+  rows+=ss.dry?nrow("info","Sent this tick",`nothing — --dry has no serial port (decided: ${t.action_name}${t.action?" "+sg(t.heading)+"° "+Math.round(t.leg)+" mm":""})`)
+    :nrow(t.sent?"ok":"warn","Sent this tick",t.sent?`${t.action_name} ${t.action?(t.color||"")+" "+sg(t.heading)+"° "+Math.round(t.leg)+" mm":""} · CMD ${t.cmd}`:"nothing — silent (lidar not live)");
+  if(ss.dry) lead="<b>--dry: nothing is sent.</b> "+lead;
+  $("sup-now").innerHTML=`<p class="lead" style="margin-bottom:4px">${lead}</p>${rows}`;
+}
+
+/* ---------------- CLI status line + telemetry ---------------- */
+function fld(label,value,cls=""){const miss=value==null||value==="—";return `<div class="f ${cls}"><div class="fl">${label}</div><div class="fv${miss?" miss":""}">${miss?"—":esc(value)}</div></div>`;}
+function renderFields(d,t,tm,st,ss){
+  const f4=v=>v==null?"----":String(Math.round(v)).padStart(4," ");
+  if(!t){ $("fields").innerHTML=fld("STM32 state",null)+fld("corner",null)+fld("F",null)+fld("L",null)+fld("R",null)+fld("hd",null)+fld("note","No session — the status line obstacle_lap prints every tick appears here, field by field.","w6");
+    $("tfields").innerHTML="";$("tchips").innerHTML="";$("sl-meta").textContent="";$("tl-meta").textContent="";return; }
+  const n=t.near, near=n?`${n.color[0]}@${sg(n.bearing_deg,0)}/${n.distance_mm==null?"inf":Math.round(n.distance_mm)}`:"-";
+  $("fields").innerHTML=
+    fld("STM32 state",tm.state_name)+fld("corner",`c${String(tm.corner_count).padStart(2,"0")}`)+
+    fld("F",f4(t.front))+fld("L",f4(t.left))+fld("R",f4(t.right))+fld("link",t.link_state)+
+    fld("hd",sg(tm.heading_deg))+fld("odo",Math.round(tm.odo_mm))+fld("obs",String(t.obs_count))+fld("nearest",near,"w2")+fld("rev/s · q",`${t.rev_per_s} · q${t.queue_depth}`)+
+    fld("action",t.action_name)+fld("target hd",sg(t.heading))+fld("leg",Math.round(t.leg))+fld("frame",t.sent?`sent · CMD ${t.cmd}`:"silent","w2")+fld("HELLO",t.hello_sent?"sent":"not yet")+
+    fld("note",t.note,"w6");
+  $("sl-meta").textContent=`${t.tick_ms} ms/tick · ${fmtAge(t.age_s)} ago`;
+  const lk=ss.link;
+  if(ss.dry){ $("tfields").innerHTML=fld("telemetry","--dry: there is no STM32. As in the CLI, the loop is fed a fake TELEM saying HEADING, corner 0.","w6")+
+      fld("lidar · cam",`${t.lidar_live?"live":"STALE"} · ${t.cam_live?"live":"STALE"}`,"w2");
+    $("tchips").innerHTML=""; $("tl-meta").textContent="--dry"; return; }
+  $("tfields").innerHTML=
+    fld("speed",`${Math.round(tm.speed_mmps)} mm/s`)+fld("yaw rate",`${sg(tm.yaw_rate_dps)}°/s`)+fld("STM32 front",mm(tm.front_mm))+
+    fld("avoid left",mm(tm.avoid_remaining_mm))+fld("seq ack",String(tm.seq_ack))+fld("TELEM age",fmtAge(tm.age_s))+
+    fld("tx PERCEPT",lk?String(lk.tx_frames):null)+fld("rx TELEM",lk?String(lk.rx_frames):null)+fld("rx STATUS",lk?String(lk.rx_status):null)+
+    fld("rx bad",lk?String(lk.rx_bad):null)+fld("lidar · cam",`${t.lidar_live?"live":"STALE"} · ${t.cam_live?"live":"STALE"}`,"w2")+
+    (lk&&lk.error&&ss.ended_by!=="reboot"?fld("link error",lk.error,"w6"):"")+
+    (ss.ended_by==="reboot"?fld("link","closed by the STM32 reboot","w6"):"");
+  $("tl-meta").textContent=st?`STATUS ${fmtAge(st.age_s)} old`:ss.dry?"--dry":"no STATUS frames";
+  const chip=(on,txt,bad)=>`<span class="${on?(bad?"bad":"on"):""}">${txt}</span>`;
+  $("tchips").innerHTML=chip(tm.running,"RUNNING")+chip(tm.lidar_stale,"LIDAR STALE",true)+chip(tm.lidar_dead,"LIDAR DEAD",true)+
+    chip(tm.dir_locked,tm.dir_locked?(tm.clockwise?"DIR LOCKED · CW":"DIR LOCKED · CCW"):"DIR NOT LOCKED")+chip(tm.imu_ok,"IMU OK")+
+    chip(tm.recovering,"RECOVERING",true)+chip(false,"COLOUR (unused)")+chip(tm.floor_colour,`floor ${tm.floor_colour}`);
+}
+
+/* ---------------- console ---------------- */
+const STATUS_RE=/^(BOOT|HEADING|AVOID|TURN90|FINISH|RECOVER|STOPPED|\?)\s+c\d\d \|/;
+function lineClass(s){
+  if(/crashed|WARNING|cannot open|not acknowledged|Traceback|Error|fatal/.test(s)) return"c-err";
+  if(s.startsWith("[stm32] #")) return"c-fw";
+  if(s.includes("[avoid]")) return"c-avoid";
+  if(s.includes("[stm32] state")) return"c-state";
+  if(s.startsWith("[reboot]")) return"c-reboot";
+  if(s.startsWith("[lap]")) return"c-lap";
+  if(STATUS_RE.test(s)) return"c-status";
+  return"";
+}
+const STATE_LINE=/^\s*\[stm32\] state (\w+)\s+corner (\d+)/;
+function trackTransitions(lines){
+  lines.forEach(([i,ts,text])=>{const m=STATE_LINE.exec(text); if(!m) return;
+    const b=m[1];
+    if(text.includes("[lap]")) return;
+    if(prevStm&&prevStm!==b){ stmHist.unshift({a:prevStm,b,t:ts*1000}); stmHist=stmHist.slice(0,6);
+      hotEdge=edgeFor(prevStm,b); hotUntil=ts*1000+2500; }
+    prevStm=b; });
+}
+let consFollow=true;     /* changed only by the reader's own scrolling */
+function appendConsole(lines){
+  if(!lines||!lines.length) return;
+  trackTransitions(lines);
+  const pre=$("console"), follow=consFollow;
+  const frag=document.createDocumentFragment();
+  lines.forEach(([i,ts,text])=>{const div=document.createElement("div");const c=lineClass(text);if(c)div.className=c;
+    const d=new Date(ts*1000);
+    div.innerHTML=`<span class="ts">${d.toLocaleTimeString([], {hour12:false})}.${String(d.getMilliseconds()).padStart(3,"0").slice(0,1)} </span>${esc(text)}`;
+    frag.appendChild(div);});
+  pre.appendChild(frag);
+  while(pre.childNodes.length>3000) pre.removeChild(pre.firstChild);
+  if(follow) pre.scrollTop=pre.scrollHeight;
+}
+$("console").addEventListener("wheel",()=>setTimeout(checkFollow,0),{passive:true});
+$("console").addEventListener("pointerup",()=>setTimeout(checkFollow,0));
+$("console").addEventListener("keyup",()=>setTimeout(checkFollow,0));
+function checkFollow(){const p=$("console");consFollow=p.scrollTop+p.clientHeight>=p.scrollHeight-24;
+  $("c-follow").textContent=consFollow?"following":"paused · scroll to the bottom to follow";}
+$("c-clear").onclick=()=>{$("console").textContent="";};
+$("c-status").onchange=e=>$("console").classList.toggle("hide-status",!e.target.checked);
+
+setTab(location.hash==="#run"?"run":"cal");
+pollRun();
+
+(async function init(){
+  const r=await(await fetch("/api/config")).json();
+  cfg=r.live;if(!cfg.fusion)cfg.fusion={};
+  renderControls();renderSampleChips();if(calOn())refreshFeed();poll();pollRaw();pollBearings();pollStream();
+  document.getElementById("save").disabled=true;document.getElementById("save").textContent="Saved";
+})();
 </script>
 </body>
 </html>

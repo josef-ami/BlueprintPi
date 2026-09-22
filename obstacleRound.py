@@ -35,8 +35,7 @@ TUNING - WHO OWNS WHAT
 
 Wire frame - one ASCII line per send, SEND_HZ times a second:
 
-    left,front,right,rev,color,err,area,vseq,coneL,coneR,wallAng,pX,pY,uX,uY,
-    sColor,sX,sY,navOk,navCross,navHdgDd,navCurvUm,navDone\\n
+    left,front,right,rev,color,err,area,vseq,coneL,coneR,wallAng,pX,pY,uX,uY\\n
 
   left/front/right  mm at 90 / 0 / 270 deg, 65535 = no return   (as openRound)
   rev               lidar revolution counter                     (as openRound)
@@ -96,26 +95,10 @@ import serial
 
 import sensors.camera as camera
 from worldstate import SharedState
-from sensors.lidar import LidarThread, lidar_live, read_three, u16 as _u16
+from sensors.lidar import LidarThread
+from openRound import UART_PORT, UART_BAUD, load_tol, read_three, lidar_live, _u16
 
 import params as prm
-from nav import NavService
-
-# openRound.py used to define these and this file imported them from there.
-# They moved: the geometry helpers went to sensors/lidar.py and the port and
-# the tolerance became things openRound.main() resolves for itself, so there
-# was nothing left to import and this module would not load at all.
-
-_CFG = prm.read_config()
-UART_PORT = _CFG.get("serial", {}).get("port", "/dev/ttyACM0")
-UART_BAUD = _CFG.get("serial", {}).get("baud", 115200)
-
-
-def load_tol():
-    """BEARING_TOL_DEG from config.json - resolved exactly as openRound does."""
-    p = prm.PiParams()
-    p.set_many(_CFG.get("params", {}))
-    return int(p["BEARING_TOL_DEG"])
 
 # ---------------- fixed, not tunable ----------------
 PROC_SIZE   = (320, 240)     # detection resolution
@@ -131,12 +114,6 @@ BOX_BGR = {COL_RED: (0, 0, 255), COL_GREEN: (0, 255, 0)}
 CMD_START = b"S\n"
 CMD_STOP = b"X\n"
 CMD_NAME = {CMD_START: "START", CMD_STOP: "STOP"}
-
-# ---------------- nav geometry, measure these on the car ----------------
-NAV_TICKS_PER_MM    = 1.4853   # = firmware TICKS_PER_CM / 10
-NAV_LIDAR_AHEAD_MM  = 130.0    # LiDAR centre ahead of the REAR AXLE (CAD: 130)
-NAV_CAMERA_AHEAD_MM = 150.0    # camera ahead of the rear axle
-NAV = None
 
 CONE_NONE = 65535
 ANG_NONE = 32767
@@ -184,13 +161,6 @@ CAND_WALL_MM = 70.0
 CAND_GAP_MM = 60.0
 CAND_MAX_WIDTH_MM = 120.0
 CAND_MIN_POINTS = 2
-CAND_EDGE_MM = 150.0
-CAND_SKIP = 2
-CAND_MIN_WIDTH_MM = 20.0
-CAND_LOOK_DEG = 80.0
-CAND_FILL_GAP = 6
-CAND_MATCH_DEG = 12.0
-CAND_FAR_MM = 4000.0
 SEND_HZ = 50
 CMD_REPEAT = 3
 BEARING_TOL_DEG = 2
@@ -621,7 +591,6 @@ def cones_full(ranges):
 
 _DEG = np.radians(np.arange(360))
 _COS, _SIN = np.cos(_DEG), np.sin(_DEG)
-_BIN_RAD = math.radians(1.0)                         # one scan bin, in radians
 
 
 def locate_pillar(ranges, bearing_deg, area, cam_fwd=None):
@@ -667,121 +636,55 @@ def locate_pillar(ranges, bearing_deg, area, cam_fwd=None):
 #
 # The camera only covers a limited wedge, so a pillar near the far wall can
 # stay out of view until it is too late. The LiDAR sees it from the start line.
-# A candidate is an object the EDGE WALK finds that is:
+# A candidate is a small cluster of returns that is:
 #   * ahead of the car (x > 0) and closer than CAND_MAX_MM
 #   * inside the corridor: more than CAND_WALL_MM from both fitted wall lines
 #     (a missing side is placed CORRIDOR_MM from the other)
 #   * short of the wall ahead (front distance - CAND_WALL_MM)
-#   * between CAND_MIN_WIDTH_MM and CAND_MAX_WIDTH_MM wide (a pillar is 50 mm,
-#     71 mm on the diagonal)
+#   * no wider than CAND_MAX_WIDTH_MM (a pillar is 50 mm, 71 mm diagonal)
 # The nearest one is sent; the STM32 lines up with it so the camera can name
 # the colour, and dodges to the roomier side if it never does.
-
-
-def _filled_scan(ranges):
-    """The scan with short dropout runs interpolated - lazygo's fix_missing.
-
-    A bin is unusable when it is not finite or falls outside
-    [80, CAND_FAR_MM] mm. Note the upper bound is the LiDAR's own useful
-    range, NOT CAND_MAX_MM: the walk needs what is BEHIND a pillar as much as
-    the pillar itself, and the far wall of a 3 m arena sits well beyond any
-    distance a candidate may be accepted at. Clipping to CAND_MAX_MM here
-    would blank the background and the falling edge onto a pillar would never
-    fire. Distance is enforced later, on the object, where it belongs.
-
-    A run of at most CAND_FILL_GAP unusable bins between two usable ones is
-    filled in; across a step larger than CAND_EDGE_MM the nearer end is COPIED
-    rather than blended, so filling can never soften a real edge into a ramp
-    the walk would then miss. Longer runs are left NaN and break the walk,
-    which is what a hole that size is.
-    """
-    r = np.asarray(ranges, dtype=np.float64).copy()
-    good = np.isfinite(r) & (r > 80) & (r < CAND_FAR_MM)
-    r[~good] = np.nan
-    if CAND_FILL_GAP <= 0 or not good.any() or good.all():
-        return r
-    n = r.size
-    idx = np.nonzero(good)[0]
-    for a, b in zip(idx, np.roll(idx, -1)):          # each usable bin to the next
-        gap = int((b - a) % n)
-        if gap <= 1 or gap - 1 > CAND_FILL_GAP:
-            continue
-        ra, rb = float(r[a]), float(r[b])
-        edge = abs(ra - rb) > CAND_EDGE_MM
-        for k in range(1, gap):
-            t = k / gap
-            r[(a + k) % n] = (ra if t < 0.5 else rb) if edge else ra + (rb - ra) * t
-    return r
-
 
 def lidar_candidates(ranges, left_line, right_line):
     """[(x, y)] pillar-centre candidates in the LiDAR frame, nearest first.
 
-    The edge walk, ported from lazygo_wro2025 (control.py detectContrast).
-    Step through the forward wedge comparing every bin with the one CAND_SKIP
-    bins behind it. A drop of more than CAND_EDGE_MM opens an object; a rise
-    of more than CAND_EDGE_MM closes the one opened most recently. The angular
-    span between the two edges, times the range at its midpoint, is the
-    object's width - keep it when that is pillar-sized.
-
-    Why this and not the clustering it replaces: a wall never opens and closes
-    within a few bins, so it is rejected by construction instead of by a width
-    test applied afterwards. The cluster version joined returns within
-    CAND_GAP_MM of each other, so a pillar standing close to the wall behind
-    it merged into the wall run and was thrown away with it. An edge survives
-    that, because the step in RANGE is still there whatever is behind it.
-
-    The corridor gating, the front-wall cut and the face-to-centre correction
-    are unchanged, so what comes out is what unclassified() and the pX/pY and
-    uX/uY fields have always been handed: pillar CENTRES, nearest first.
+    Cluster FIRST, filter second: a wall is one long run of returns and is
+    thrown out whole by the width test. Filtering first would chop a wall
+    into short fragments at the cut lines, and those look like pillars.
     """
     if left_line is None and right_line is None:
         return []                                    # corner: no corridor to search in
-    r = _filled_scan(ranges)
-    look = int(round(CAND_LOOK_DEG))
-    skip = max(1, int(CAND_SKIP))
-    wedge = [b % 360 for b in range(-look, look + 1)]
-
-    fwd = np.asarray(ranges, dtype=np.float64)[(np.arange(-3, 4)) % 360]
+    r = np.asarray(ranges, dtype=np.float64)
+    ok = np.isfinite(r) & (r > 80) & (r < CAND_MAX_MM + 400)
+    idx = np.nonzero(ok)[0]
+    if idx.size == 0:
+        return []
+    x, y = r[idx] * _COS[idx], r[idx] * _SIN[idx]
+    fwd = r[(np.arange(-3, 4)) % 360]
     fwd = fwd[np.isfinite(fwd)]
     front = float(np.median(fwd)) if fwd.size else np.inf
 
-    out, opened = [], []
-    for k in range(skip, len(wedge)):
-        here, back = r[wedge[k]], r[wedge[k - skip]]
-        if not (np.isfinite(here) and np.isfinite(back)):
-            opened.clear()        # a hole this long: nothing still open is trustworthy
+    clusters, cur = [], [0]
+    for k in range(1, idx.size):
+        if idx[k] - idx[cur[-1]] <= 3 and \
+                math.hypot(x[k] - x[cur[-1]], y[k] - y[cur[-1]]) < CAND_GAP_MM:
+            cur.append(k)
+        else:
+            clusters.append(cur); cur = [k]
+    clusters.append(cur)
+    if len(clusters) > 1 and idx[0] + 360 - idx[-1] <= 3 and \
+            math.hypot(x[0] - x[-1], y[0] - y[-1]) < CAND_GAP_MM:   # wrap at 0/359
+        clusters[0] = clusters[-1] + clusters[0]; clusters.pop()
+
+    out = []
+    for c in clusters:
+        if len(c) < CAND_MIN_POINTS:
             continue
-        # An object cannot be wider than CAND_MAX_WIDTH_MM, so an edge opened
-        # further back than that many bins is not the start of one. Dropping it
-        # here is what stops a steep wall gradient - the box corner, where the
-        # ray stops hitting the wall ahead and starts hitting the wall beside,
-        # opens an edge and then simply never closes - from being popped much
-        # later by an unrelated rising edge. The cap is worked out at the
-        # OPENING range, not the current one: by the time an object closes, the
-        # bin under the cursor is the background behind it, which is further
-        # away and would give a cap too tight to let the object through.
-        while opened:
-            d_open = float(r[wedge[opened[0]]])
-            span_cap = CAND_MAX_WIDTH_MM / max(d_open, 1.0) / _BIN_RAD + skip
-            if np.isfinite(d_open) and k - opened[0] <= span_cap:
-                break
-            opened.pop(0)
-        step = float(here) - float(back)
-        if step < -CAND_EDGE_MM:                      # falling edge: object starts
-            if not opened or k - opened[-1] > skip:
-                opened.append(k)    # else: the same edge, seen skip times over
-            continue
-        if step <= CAND_EDGE_MM or not opened:        # rising edge closes the last one
-            continue
-        a = opened.pop()
-        mid = wedge[(a + k) // 2]
-        d = float(r[mid])
-        if not np.isfinite(d):
-            continue
-        if not CAND_MIN_WIDTH_MM < d * (k - a) * _BIN_RAD <= CAND_MAX_WIDTH_MM:
-            continue                                  # speckle, or too wide to be a pillar
-        mx, my = d * _COS[mid], d * _SIN[mid]
+        cx, cy = x[c], y[c]
+        if math.hypot(cx.max() - cx.min(), cy.max() - cy.min()) > CAND_MAX_WIDTH_MM:
+            continue                                  # wall run
+        mx, my = float(cx.mean()), float(cy.mean())
+        d = math.hypot(mx, my)
         if mx <= 0 or d > CAND_MAX_MM or mx > front - CAND_WALL_MM:
             continue
         if left_line is not None:
@@ -794,39 +697,6 @@ def lidar_candidates(ranges, left_line, right_line):
                     my + FACE_TO_CENTRE_MM * my / d))   # face -> centre
     out.sort(key=lambda p: math.hypot(*p))
     return out
-
-
-def match_pillar(cands, bearing_deg, tol_deg=None):
-    """The candidate the camera is looking at, or None - lazygo's fusion.
-
-    The LiDAR owns the geometry and the camera only says which way to look and
-    what colour is standing there. So rather than hunting the scan for returns
-    near the camera ray (locate_pillar, which is now the fallback), take the
-    object the edge walk already found whose bearing is closest to that ray.
-
-    Bearings are compared FROM THE CAMERA, which sits CAMERA_FWD_MM ahead of
-    the LiDAR - at 40 cm that parallax is several degrees.
-    """
-    if bearing_deg is None or not cands:
-        return None
-    tol = CAND_MATCH_DEG if tol_deg is None else tol_deg
-    best, best_err = None, float(tol)
-    for c in cands:
-        cx, cy = c[0] - CAMERA_FWD_MM, c[1]
-        if cx == 0.0 and cy == 0.0:
-            continue
-        err = abs((math.degrees(math.atan2(cy, cx)) - bearing_deg + 180.0) % 360.0 - 180.0)
-        if err < best_err:
-            best, best_err = c, err
-    return best
-
-
-def _fuse(cands, ranges, colour, bearing_deg, area):
-    """(x, y) for one camera detection: edge-walk match first, ray hunt second."""
-    if colour == COL_NONE:
-        return None
-    return match_pillar(cands, bearing_deg) or \
-        locate_pillar(ranges, bearing_deg, area)
 
 
 def unclassified(cands, classified_xy, match_mm=200.0):
@@ -1247,19 +1117,7 @@ def run_flask():
 # --------------------------------------------------------------------------
 
 def handle_rx(text):
-    """One line from the STM32. '!' = parameters, 'T' = telemetry, else a log."""
-    if text.startswith("T "):
-        # T <heading_deci_deg> <encoder_ticks> <state>
-        # This is what lets nav dead-reckon between LiDAR revolutions. Without
-        # it the pose would have to coast ~100 ms on no information at all,
-        # which at 400 mm/s is 40 mm of drift per scan.
-        if NAV is not None:
-            try:
-                _, hd, enc, _st = text.split()
-                NAV.on_telemetry(int(hd) / 10.0, int(enc))
-            except ValueError:
-                pass
-        return
+    """One line from the STM32. '!' = parameter protocol, anything else = log."""
     if text.startswith("!"):
         msg = STM.on_line(text)
         if msg:
@@ -1301,21 +1159,6 @@ def main():
     lidar.start()
     vis = VisionThread()
     vis.start()
-
-    # The nav solve takes ~200 ms and MUST NOT run in this loop - it would
-    # stall the feed past the firmware's LIDAR_STALE_MS of 200 mid-corner.
-    # NavService does the heavy work on its own thread and this loop only
-    # reads five already-computed integers out of it.
-    global NAV
-    # MUST match the firmware's TICKS_PER_CM / 10. If you re-calibrate
-    # odometry, change it in BOTH places or the dead reckoning between scans
-    # will be wrong by that ratio.
-    NAV = NavService(lidar, ticks_per_mm=NAV_TICKS_PER_MM,
-                     lidar_ahead_mm=NAV_LIDAR_AHEAD_MM,
-                     camera_ahead_mm=NAV_CAMERA_AHEAD_MM,
-                     log=note)
-    NAV.start()
-    note("[pi] nav service started (firmware param USE_NAV_TRACK gates it)")
     threading.Thread(target=run_flask, name="Flask", daemon=True).start()
 
     print(f"[obstacle] lidar+camera -> {UART_PORT}. "
@@ -1372,35 +1215,18 @@ def main():
                     cl, cr, yaw, lline, rline = cones_full(lidar._ranges)
                     cands = lidar_candidates(lidar._ranges, lline, rline)
                 v = vision_now(now)
-                # colour from the camera, position from the LiDAR: the object
-                # the edge walk found on the camera's ray. locate_pillar is the
-                # fallback for a pillar the walk missed - too far, half behind
-                # the wall line, or in the shadow of a nearer one.
-                pxy = _fuse(cands, lidar._ranges, v["color"], v["bearing"], v["area"])
+                pxy = (locate_pillar(lidar._ranges, v["bearing"], v["area"])
+                       if v["color"] != COL_NONE else None)
                 pX, pY = _pxy(pxy)
-                sxy = _fuse(cands, lidar._ranges, v["s_color"],
-                            v["s_bearing"], v["s_area"])
+                sxy = (locate_pillar(lidar._ranges, v["s_bearing"], v["s_area"])
+                       if v["s_color"] != COL_NONE else None)
                 sX, sY = _pxy(sxy)
                 uxy = unclassified(cands, pxy)
                 uX, uY = _pxy(uxy)
-                # hand the camera's colours to nav. It only needs a BEARING:
-                # position comes from the LiDAR, which has 360 deg of coverage
-                # and no 885 mm range limit.
-                if NAV is not None:
-                    dets = []
-                    if v["color"] != COL_NONE and v["bearing"] is not None:
-                        dets.append((v["color"], v["bearing"]))
-                    if v["s_color"] != COL_NONE and v["s_bearing"] is not None:
-                        dets.append((v["s_color"], v["s_bearing"]))
-                    NAV.on_camera(dets)
-                    nOk, nCross, nHdg, nCurv, nDone = NAV.wire_fields()
-                else:
-                    nOk = nCross = nHdg = nCurv = nDone = 0
                 line = (f"{_u16(l)},{_u16(f)},{_u16(r)},{lidar.rev},"
                         f"{v['color']},{v['err']},{v['area']},{v['seq']},"
                         f"{_cone_u16(cl)},{_cone_u16(cr)},{_ang(yaw)},{pX},{pY},{uX},{uY},"
-                        f"{v['s_color']},{sX},{sY},"
-                        f"{nOk},{nCross},{nHdg},{nCurv},{nDone}\n")
+                        f"{v['s_color']},{sX},{sY}\n")
                 if write(line.encode("ascii")):
                     frames += 1
                 link.update(line=line, t=now, f=f, l=l, r=r, cl=cl, cr=cr,
@@ -1428,8 +1254,6 @@ def main():
                 frames = 0
                 fmt = lambda x: "----" if x is None else f"{int(x):4d}"
                 name = {COL_RED: "RED", COL_GREEN: "GRN"}.get(v["color"], "---")
-                if NAV is not None:
-                    print("[obstacle] " + NAV.status())
                 print(f"[obstacle] F {fmt(f)} L {fmt(l)} R {fmt(r)} mm | "
                       f"{name} err {v['err']:+4d} area {v['area']:5d} | "
                       f"{stm_state['state']} {stm_state['corner']} | "

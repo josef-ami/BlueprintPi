@@ -1,4 +1,19 @@
 {
+  "avoid": {
+    "car_half_width_mm": 57.1,
+    "confirm_ticks": 3,
+    "engage_mm": 900,
+    "freeze_mm": 350,
+    "margin_mm": 40,
+    "max_bearing_deg": 50,
+    "max_heading_deg": 45,
+    "min_range_mm": 150,
+    "pillar_half_width_mm": 25,
+    "refractory_mm": 150,
+    "tail_clear_mm": 150,
+    "wall_guard": true,
+    "wall_margin_mm": 90
+  },
   "camera_intrinsics": {
     "D": [
       0.05460518934568049,
@@ -30,163 +45,79 @@
     "model": "fisheye",
     "rms_reproj_error": 1.7575010745141275
   },
+  "fusion": {
+    "bearing_match_deg": 8,
+    "gap_split_mm": 200,
+    "range_floor_mm": 120
+  },
+  "hfov_deg": 160,
+  "hsv": {
+    "GREEN": [
+      [
+        [
+          40,
+          80,
+          60
+        ],
+        [
+          85,
+          255,
+          255
+        ]
+      ]
+    ],
+    "MAGENTA": [
+      [
+        [
+          140,
+          80,
+          80
+        ],
+        [
+          165,
+          255,
+          255
+        ]
+      ]
+    ],
+    "RED": [
+      [
+        [
+          0,
+          120,
+          70
+        ],
+        [
+          10,
+          255,
+          255
+        ]
+      ],
+      [
+        [
+          170,
+          120,
+          70
+        ],
+        [
+          180,
+          255,
+          255
+        ]
+      ]
+    ]
+  },
   "lidar": {
-    "baud": 460800,
+    "cluster_gap_mm": 120,
+    "max_range_mm": 3000,
+    "min_cluster_points": 3,
+    "min_neighbours": 2,
     "mount_offset_deg": 0,
-    "port": "/dev/ttyUSB0"
+    "neighbour_dist_mm": 150,
+    "quality_floor": 10,
+    "bearing_tol_deg": 2
   },
-  "params": {
-    "ALLOW_GIVE_UP": true,
-    "AREA_K": 14000.0,
-    "AVOID_MARGIN_MM": 15.0,
-    "BEARING_TOL_DEG": 2,
-    "CAMERA_FWD_MM": 0.0,
-    "CAMERA_OFFSET_DEG": 5.0,
-    "CAND_GAP_MM": 60.0,
-    "CAND_MAX_MM": 1800.0,
-    "CAND_MAX_WIDTH_MM": 120.0,
-    "CAND_MIN_POINTS": 2,
-    "CAND_WALL_MM": 70.0,
-    "CARRY_TRACKS": true,
-    "CAR_HALF_W_MM": 57.0,
-    "CENTRE_AIM_MM": 600.0,
-    "CENTRE_YAW_MAX": 20.0,
-    "CMD_REPEAT": 3,
-    "COLOR_CONFIRM_S": 0.006,
-    "CONE_AGREE_DEG": 6.0,
-    "CONE_DEG": 45,
-    "CONE_INLIER_MM": 25,
-    "CONE_MAX_RANGE_MM": 1500,
-    "CONE_MIN_INLIERS": 8,
-    "CONE_MIN_RANGE_MM": 60,
-    "CONE_MIN_SPAN_MM": 150,
-    "CORNER_ARC_ADAPT": true,
-    "CORNER_EXIT_BIAS_MM": 200.0,
-    "CORNER_EXIT_MM": 0.0,
-    "CORRIDOR_MM": 1000.0,
-    "CROSS_MAX_LAT_MM": 1300.0,
-    "DRIVE_PWM": 60,
-    "FACE_TO_CENTRE_MM": 25.0,
-    "FINAL_STRAIGHT_CM": 100.0,
-    "FLOOR_AB_TOL": 14,
-    "FLOOR_L_MIN": 120,
-    "GIVEUP_LEAD_MM": 60.0,
-    "GREEN_A_HI": 110,
-    "GREEN_A_LO": 0,
-    "GREEN_B_HI": 255,
-    "GREEN_B_LO": 0,
-    "GREEN_H_HI": 85,
-    "GREEN_H_LO": 40,
-    "GREEN_L_HI": 230,
-    "GREEN_L_LO": 20,
-    "GREEN_S_HI": 255,
-    "GREEN_S_LO": 80,
-    "GREEN_V_HI": 255,
-    "GREEN_V_LO": 60,
-    "HFOV_DEG": 160.0,
-    "HOLD_AIM_MM": 250.0,
-    "JPEG_QUALITY": 50,
-    "LAB_CHROMA_MIN": 20,
-    "LANE_VALID_MAX_MM": 1100,
-    "LEVEL_GAIN": 0.05,
-    "LEVEL_MAX_DIFF": 8.0,
-    "LEVEL_MAX_STEP": 0.3,
-    "LEVEL_MAX_WALLANG": 20.0,
-    "LIDAR_DEAD_S": 1.0,
-    "LIDAR_STALE_S": 0.3,
-    "MIN_AREA_PROC": 300,
-    "MNV_ARC_FWD_DEG": 55.0,
-    "MNV_ARC_STOP_FRONT_MM": 170,
-    "MNV_DEEP_CAP_CM": 90.0,
-    "MNV_DEEP_FRONT_MM": 520,
-    "MNV_DONE_DEG": 6.0,
-    "MNV_LEG_STEP_DEG": 12.0,
-    "MNV_MAX_LEGS": 3,
-    "MNV_REV_CAP_CM": 40.0,
-    "MNV_STOP_MS": 150,
-    "MNV_SWING_LAT_MM": 150.0,
-    "MNV_SWING_YAW_MAX": 20.0,
-    "MNV_ZONE_MM": 700.0,
-    "OFF_JUMP_MM": 120.0,
-    "PASS_AIM_MIN_MM": 120.0,
-    "PASS_HOLD_MM": 250.0,
-    "PASS_LEAD_MM": 160.0,
-    "PASS_MARGIN_MM": 80.0,
-    "PASS_YAW_MAX": 75.0,
-    "PILLAR_HALF_MM": 25.0,
-    "PILLAR_MAX_LAT_MM": 420.0,
-    "PILLAR_MAX_MM": 2000.0,
-    "PLAN_MAX_AHEAD_MM": 1600.0,
-    "POST_CORNER_BOOST_MM": 600.0,
-    "POST_CORNER_LOCKOUT_CM": 50.0,
-    "POST_CORNER_YAW_MAX": 45.0,
-    "PRE_CORNER_SWING_MM": 250.0,
-    "PRE_CORNER_ZONE_MM": 900.0,
-    "RAY_WINDOW_DEG": 8.0,
-    "RED1_H_HI": 10,
-    "RED1_H_LO": 0,
-    "RED1_S_HI": 255,
-    "RED1_S_LO": 120,
-    "RED1_V_HI": 255,
-    "RED1_V_LO": 70,
-    "RED2_H_HI": 180,
-    "RED2_H_LO": 170,
-    "RED2_S_HI": 255,
-    "RED2_S_LO": 120,
-    "RED2_V_HI": 255,
-    "RED2_V_LO": 70,
-    "RED_A_HI": 255,
-    "RED_A_LO": 150,
-    "RED_B_HI": 255,
-    "RED_B_LO": 128,
-    "RED_L_HI": 230,
-    "RED_L_LO": 20,
-    "SEARCH_SAFETY_CM": 400.0,
-    "SECONDARY_ZONE_MM": 1500.0,
-    "SEND_HZ": 50,
-    "SIDE_OPEN_FRAMES": 3,
-    "SIDE_OPEN_MM": 1500,
-    "SIDE_WALL_FRAMES": 3,
-    "STM_PUSH_PER_LOOP": 4,
-    "SWAP_RB": true,
-    "TARGET_CORNERS": 12,
-    "TELEM_STALE_S": 0.3,
-    "TRACK_CONFIRM": 2,
-    "TRACK_FORGET_MM": 300.0,
-    "TRACK_MATCH_MM": 200.0,
-    "TURN_ARM_MAX_MM": 1600.0,
-    "TURN_CAP_CM": 150.0,
-    "TURN_DELAY_MM": 0,
-    "TURN_FRONT_INNER_MM": 1050.0,
-    "TURN_FRONT_MM": 600.0,
-    "TURN_FRONT_OUTER_MM": 600.0,
-    "TURN_LOCK_FRACTION": 0.7,
-    "TURN_LOCK_INNER": 1.0,
-    "TURN_LOCK_OUTER": 0.7,
-    "TURN_RADIUS_MM": 270.0,
-    "TURN_TRIGGER_MAX_YAW": 25.0,
-    "UNK_COMMIT_MM": 400.0,
-    "USE_CORNER_MANEUVER": true,
-    "USE_INTRINSICS": true,
-    "USE_LAB": false,
-    "USE_SECONDARY_CORNER": true,
-    "VISION_STALE_S": 0.2,
-    "WALL_MARGIN_MM": 45.0,
-    "aspect_min": 0.8,
-    "bottom_margin_px": 3,
-    "contrast_s_min": 50,
-    "dark_v_max": 50,
-    "floor_below_min": 0.45,
-    "floor_s_max": 60,
-    "floor_v_min": 120,
-    "ignore_bottom_px": 0,
-    "linked_test": true,
-    "solidity_min": 0.5,
-    "strip_px": 6
-  },
-  "serial": {
-    "baud": 115200,
-    "port": "/dev/ttyACM0"
-  },
-  "stm32": {}
+  "min_blob_area": 300,
+  "swap_rb": true,
+  "camera_offset_deg": 5 
 }
