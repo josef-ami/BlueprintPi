@@ -65,6 +65,22 @@ Replies from the firmware start with '!' (parameters) or '#' (log).
 Silence rules: lidar stale -> no frames are sent (commands still are).
 Camera stale (> VISION_STALE_S) -> color is sent as 2 (none).
 
+RECORDING (training images for a YOLO detector)
+  Every run is saved to take/ next to this file, one folder per run:
+
+      take/run_20260923_141502/run_20260923_141502_00000.jpg ...
+      take/run_20260923_141502/frames.csv     time, state, corner, lidar front, colour
+
+  Recording starts when the STM32 logs "# GO" and stops at "# FINISHED" or
+  "# STOP from Pi". The Record button on the Run tab saves frames the same way
+  without a run (push the car around the mat by hand). The frames are the RAW
+  camera image, exactly what the detector sees, with no overlay drawn on them.
+  Tune tab, "Recording": RECORD_RUNS on/off, RECORD_HZ, JPEG quality, and the
+  free-space floor. Saving runs on its own thread and drops frames rather than
+  ever slowing the camera. Pull them to the PC with
+
+      scp -r suntzu@<pi>:/home/suntzu/take ./take
+
 A NOTE ON THE CAMERA MODEL
   config.json disagrees with itself: camera_intrinsics.K has fx = 383 px/rad,
   which on a 640 px frame is +/-48 deg, while hfov_deg says 160 (+/-80), a
@@ -76,8 +92,11 @@ A NOTE ON THE CAMERA MODEL
 """
 
 import collections
+import csv
 import math
+import os
 import queue
+import shutil
 import threading
 import time
 
@@ -127,7 +146,7 @@ PI = prm.PiParams(prm.PI_SPECS)
 STM = prm.StmParams()
 
 _MIRRORED = [s.name for s in prm.PI_SPECS
-             if s.group in ("camera", "cone", "locate", "cand", "link", "lab")]
+             if s.group in ("camera", "cone", "locate", "cand", "link", "lab", "record")]
 
 # defaults, so the names exist before the first sync
 MIN_AREA_PROC = 250
@@ -161,6 +180,11 @@ SEND_HZ = 50
 CMD_REPEAT = 3
 BEARING_TOL_DEG = 2
 STM_PUSH_PER_LOOP = 4
+
+RECORD_RUNS = True
+RECORD_HZ = 3.0
+RECORD_JPEG_Q = 92
+RECORD_MIN_FREE_MB = 500
 
 USE_LAB = False
 FLOOR_L_MIN = 120
@@ -204,6 +228,168 @@ commands = queue.Queue()                          # written to serial by the mai
 def note(msg):
     print(msg)
     stm_log.append(msg)
+
+
+# --------------------------------------------------------------------------
+# recorder - raw camera frames to take/<session>/ for training a detector
+# --------------------------------------------------------------------------
+#
+# The vision thread calls offer() once per camera frame. offer() only checks
+# the rate and hands the frame REFERENCE to a small queue (grab_rgb() returns a
+# fresh array every frame and nothing writes to it afterwards, so no copy is
+# needed). This thread does the JPEG encode and the SD-card write. If the card
+# is slow the queue fills and frames are DROPPED and counted - the camera, and
+# with it the 50 Hz feed to the STM32, never waits on the disk.
+#
+# A session starts on "# GO" from the STM32 (or the Record button) and ends on
+# "# FINISHED" / "# STOP from Pi" (or the button again). Each session is its
+# own folder, and every file name carries the folder name, so images from
+# many runs can be merged into one training set without name clashes.
+
+TAKE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "take")
+
+
+class FrameRecorder(threading.Thread):
+
+    def __init__(self):
+        super().__init__(name="Recorder", daemon=True)
+        self._q = queue.Queue(maxsize=8)
+        self._halt = threading.Event()   # NOT _stop: that name is taken by Thread
+        self._lock = threading.Lock()
+        self.run_active = False          # between "# GO" and "# FINISHED"/"# STOP"
+        self.manual = False              # the page's Record button
+        self.session = 0                 # bumped on every start; the writer
+        self._kind = "run"               #   opens a new folder when it changes
+        self.folder = ""                 # current folder name, for the page
+        self.saved = 0                   # frames written in the current session
+        self.dropped = 0                 # frames lost to a full queue (slow SD)
+        self.error = None
+        self._last_offer = 0.0
+
+    # ---- control, from the serial loop and the web page ----
+
+    def _begin(self, kind):
+        with self._lock:
+            self.session += 1
+            self._kind = kind
+            self.error = None
+            self.folder, self.saved = "", 0   # the writer fills these on the first frame
+            self._last_offer = 0.0
+
+    def start_run(self):
+        """'# GO' seen. Honours RECORD_RUNS; the button keeps its own session."""
+        if not RECORD_RUNS or self.manual:
+            return
+        self._begin("run")
+        self.run_active = True
+
+    def _stopped_note(self):
+        note(f"[pi] recording stopped: {self.saved} frames in take/{self.folder}"
+             if self.folder else "[pi] recording stopped: no frames saved")
+
+    def end_run(self):
+        if self.run_active:
+            self.run_active = False
+            self._stopped_note()
+
+    def set_manual(self, on):
+        on = bool(on)
+        if on and not self.manual:
+            self.run_active = False          # the button's session replaces a run's
+            self._begin("manual")
+            self.manual = True
+            note("[pi] recording (Record button)")
+        elif not on and self.manual:
+            self.manual = False
+            self._stopped_note()
+
+    def recording(self):
+        return self.run_active or self.manual
+
+    def status(self):
+        return {"on": self.recording(), "manual": self.manual, "folder": self.folder,
+                "saved": self.saved, "dropped": self.dropped, "error": self.error}
+
+    # ---- from the vision thread, once per camera frame ----
+
+    def offer(self, frame):
+        if not self.recording():
+            return
+        now = time.monotonic()
+        if now - self._last_offer < 1.0 / max(0.1, float(RECORD_HZ)):
+            return
+        self._last_offer = now
+        meta = (time.strftime("%H:%M:%S") + f".{int(time.time() * 1000) % 1000:03d}",
+                stm_state["state"], stm_state["corner"],
+                "" if link["f"] is None else int(link["f"]),
+                NAMES.get(vision.get("color", COL_NONE), "none"))
+        try:
+            self._q.put_nowait((self.session, self._kind, frame, meta))
+        except queue.Full:
+            self.dropped += 1
+
+    # ---- the writer ----
+
+    def stop(self):
+        self._halt.set()
+
+    def run(self):
+        cur, path, fh, writer = None, None, None, None
+        try:
+            while not self._halt.is_set():
+                try:
+                    sess, kind, frame, meta = self._q.get(timeout=0.5)
+                except queue.Empty:
+                    if fh is not None and not self.recording():
+                        fh.close()
+                        fh = writer = None
+                    continue
+                if sess != self.session:
+                    continue                             # left over from an ended session
+                try:
+                    if sess != cur or fh is None:
+                        if fh is not None:
+                            fh.close()
+                        name = f"{kind}_{time.strftime('%Y%m%d_%H%M%S')}"
+                        if os.path.exists(os.path.join(TAKE_DIR, name)):
+                            name += f"_{sess}"           # two sessions in one second
+                        path = os.path.join(TAKE_DIR, name)
+                        os.makedirs(path, exist_ok=True)
+                        fh = open(os.path.join(path, "frames.csv"), "a", newline="")
+                        writer = csv.writer(fh)
+                        if fh.tell() == 0:
+                            writer.writerow(["file", "time", "state", "corner",
+                                             "front_mm", "colour_seen"])
+                        cur = sess
+                        self.folder, self.saved = name, 0
+                        note(f"[pi] recording to take/{name}")
+
+                    free_mb = shutil.disk_usage(path).free / 1e6
+                    if free_mb < RECORD_MIN_FREE_MB:
+                        if self.error is None:
+                            self.error = f"SD card nearly full ({free_mb:.0f} MB free)"
+                            note(f"[pi] recording paused: {self.error}")
+                        continue
+
+                    fname = f"{self.folder}_{self.saved:05d}.jpg"
+                    bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                    if not cv2.imwrite(os.path.join(path, fname), bgr,
+                                       [int(cv2.IMWRITE_JPEG_QUALITY), int(RECORD_JPEG_Q)]):
+                        raise OSError(f"could not write {fname}")
+                    writer.writerow([fname, *meta])
+                    self.saved += 1
+                    if self.saved % 25 == 0:
+                        fh.flush()                       # a power cut loses < 25 rows
+                except OSError as e:
+                    if self.error is None:
+                        note(f"[pi] recording error: {e}")
+                    self.error = str(e)
+        finally:
+            if fh is not None:
+                fh.close()
+
+
+RECORDER = FrameRecorder()
 
 
 # --------------------------------------------------------------------------
@@ -465,6 +651,7 @@ class VisionThread(threading.Thread):
             while not self._halt.is_set():
                 pf = PILLAR_FILTER                        # one read, one frame
                 frame = camera.grab_rgb(cam, SWAP_RB)
+                RECORDER.offer(frame)                     # raw frame, no overlay
                 small = cv2.resize(frame, PROC_SIZE, interpolation=cv2.INTER_AREA)
                 hsv, lab = colour_spaces(small)
 
@@ -782,6 +969,7 @@ def track_stm32(line):
         stm_state["state"] = "START refused (lidar stale)"
     elif s.startswith("GO"):
         stm_state.update(state="RUNNING", corner="0/12", exit="")
+        RECORDER.start_run()
     elif s.startswith("TURN "):
         stm_state["corner"] = s.split()[1]
     elif s.startswith("next straight"):
@@ -798,9 +986,11 @@ def track_stm32(line):
         stm_state["state"] = "FINAL STRAIGHT"
     elif s.startswith("STOP from Pi"):
         stm_state["state"] = "STOPPED"
+        RECORDER.end_run()
     elif s.startswith("FINISHED"):
         if stm_state["state"] != "STOPPED":
             stm_state["state"] = "FINISHED"
+        RECORDER.end_run()
     elif s.startswith("first Pi frame"):
         stm_state["state"] = "connected"
 
@@ -868,6 +1058,8 @@ td{padding:2px 14px 2px 0}td.k{color:var(--dim)}
     <div class=big id=corner></div>
     <button class=act id=start onclick="cmd('start')">START</button>
     <button class=act id=stop onclick="cmd('stop')">STOP</button>
+    <div><button class=small id=rec onclick="rec()">Record</button>
+      <span id=recMsg class=dim></span></div>
     <div class=big id=live></div>
     <h3>STM32 log</h3><pre id=log></pre>
   </div>
@@ -901,11 +1093,15 @@ function tab(n){pane=n;for(const k of ['Run','Tune','Tel']){
   if(n==='Tune'&&!built) loadParams(true);}
 const f=x=>x===null||x===undefined?'--':Math.round(x);
 async function cmd(c){await fetch('/api/'+c,{method:'POST'});}
+let recManual=false;
+async function rec(){await fetch('/api/record',{method:'POST',headers:{'Content-Type':'application/json'},
+  body:JSON.stringify({on:!recManual})});}
 
 // ---- Tune ----
 const GROUPS={camera:'Camera',hsv:'HSV colour ranges',lab:'Lab colour ranges',
   filter:'Pillar filter (incl. LazyGo ROI / height)',
-  cone:'Wall cone fit',locate:'Pillar location',cand:'LiDAR candidates (LazyGo edges)',link:'Link'};
+  cone:'Wall cone fit',locate:'Pillar location',cand:'LiDAR candidates (LazyGo edges)',link:'Link',
+  record:'Recording (training images to take/)'};
 const SGROUPS=['Drive & heading','Colour trigger & turn','Lane planner','Passing a pillar',
   'Wall levelling','Reverse & re-plan','Corner exit','Safety','Link'];
 
@@ -980,6 +1176,14 @@ async function tick(){
      (r.second_xy?` at ${r.second_xy[0]},${r.second_xy[1]}`:''):'')+
    (r.pillar_xy?` &nbsp;at ${r.pillar_xy[0]} fwd, ${r.pillar_xy[1]} left mm`:'')+
    (r.unknown_xy?`<br>lidar object (colour unknown) ${r.unknown_xy[0]} fwd, ${r.unknown_xy[1]} left mm`:'');
+  const rc=r.rec||{};
+  recManual=!!rc.manual;
+  $('rec').textContent=recManual?'Stop recording':'Record';
+  $('rec').style.background=recManual?'#c33':'#444';
+  $('recMsg').innerHTML=(rc.on?`<span class=bad>&#9679; REC</span> take/${rc.folder||'...'} `+
+     `${rc.saved} saved`:(rc.folder?`last: take/${rc.folder} (${rc.saved} frames)`:'not recording'))+
+    (rc.dropped?` <span class=dim>(${rc.dropped} dropped)</span>`:'')+
+    (rc.error?` <span class=bad>${rc.error}</span>`:'');
   const lg=$('log'), atBottom=lg.scrollTop+lg.clientHeight>=lg.scrollHeight-5;
   lg.textContent=r.log.join('\n'); if(atBottom) lg.scrollTop=lg.scrollHeight;
   if(pane==='Tel'){
@@ -1034,8 +1238,17 @@ def status():
         "last_line": link["line"].strip(),
         "stm32_state": stm_state["state"], "corner": stm_state["corner"],
         "exit": stm_state["exit"], "lane": stm_state["lane"],
+        "rec": RECORDER.status(),
         "log": list(stm_log),
     })
+
+
+@app.route("/api/record", methods=["POST"])
+def api_record():
+    """The Record button: save frames without a run (car pushed by hand)."""
+    body = request.get_json(force=True, silent=True) or {}
+    RECORDER.set_manual(body.get("on", not RECORDER.manual))
+    return jsonify({"ok": True, "rec": RECORDER.status()})
 
 
 @app.route("/api/start", methods=["POST"])
@@ -1208,6 +1421,7 @@ def main():
     shared = SharedState()
     lidar = LidarThread(shared)
     lidar.start()
+    RECORDER.start()
     vis = VisionThread()
     vis.start()
     threading.Thread(target=run_flask, name="Flask", daemon=True).start()
@@ -1330,6 +1544,8 @@ def main():
         lidar.stop()
         vis.join(timeout=2.0)
         lidar.join(timeout=2.0)
+        RECORDER.stop()                       # after the camera: closes frames.csv
+        RECORDER.join(timeout=2.0)
         ser.close()
         print("[obstacle] stopped")
 
