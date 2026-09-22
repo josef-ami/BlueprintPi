@@ -224,6 +224,25 @@ PI_SPECS = [
     Spec("CAND_MAX_WIDTH_MM", 120.0, 40, 600, "cand", "f",
          "wider than this is a wall run, not a pillar"),
     Spec("CAND_MIN_POINTS", 2, 1, 30, "cand", "i", ""),
+    # the edge walk (obstacleRound.py). CAND_GAP_MM and CAND_MIN_POINTS above
+    # belong to the clustering version, which sensors/lidar.py still runs.
+    Spec("CAND_EDGE_MM", 150.0, 50, 1500, "cand", "f",
+         "radial step between two samples that opens or closes an object. "
+         "lazygo ran 250; a pillar standing 120 mm off our wall only steps "
+         "~230, so it has to be lower here than it is there"),
+    Spec("CAND_SKIP", 2, 1, 10, "cand", "i",
+         "bins between the two samples the step is measured across"),
+    Spec("CAND_MIN_WIDTH_MM", 20.0, 5, 100, "cand", "f",
+         "narrower than this is a speckle, not a pillar"),
+    Spec("CAND_LOOK_DEG", 80.0, 20, 180, "cand", "f",
+         "half-width of the forward wedge the walk covers"),
+    Spec("CAND_FILL_GAP", 6, 0, 30, "cand", "i",
+         "dropout runs up to this long are interpolated; longer ones break the walk"),
+    Spec("CAND_MATCH_DEG", 12.0, 1, 45, "cand", "f",
+         "a camera detection claims the candidate within this bearing of its ray"),
+    Spec("CAND_FAR_MM", 4000.0, 1000, 12000, "cand", "f",
+         "returns beyond this are dropouts; the walk needs the far wall, so it "
+         "is NOT CAND_MAX_MM"),
 
     # ---------------- lane planner ---------------- (was firmware)
     Spec("CORRIDOR_MM", 1000.0, 300, 2000, "plan", "f",

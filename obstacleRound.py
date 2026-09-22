@@ -184,6 +184,13 @@ CAND_WALL_MM = 70.0
 CAND_GAP_MM = 60.0
 CAND_MAX_WIDTH_MM = 120.0
 CAND_MIN_POINTS = 2
+CAND_EDGE_MM = 150.0
+CAND_SKIP = 2
+CAND_MIN_WIDTH_MM = 20.0
+CAND_LOOK_DEG = 80.0
+CAND_FILL_GAP = 6
+CAND_MATCH_DEG = 12.0
+CAND_FAR_MM = 4000.0
 SEND_HZ = 50
 CMD_REPEAT = 3
 BEARING_TOL_DEG = 2
@@ -608,6 +615,7 @@ def cones_full(ranges):
 
 _DEG = np.radians(np.arange(360))
 _COS, _SIN = np.cos(_DEG), np.sin(_DEG)
+_BIN_RAD = math.radians(1.0)                         # one scan bin, in radians
 
 
 def locate_pillar(ranges, bearing_deg, area, cam_fwd=None):
@@ -653,55 +661,121 @@ def locate_pillar(ranges, bearing_deg, area, cam_fwd=None):
 #
 # The camera only covers a limited wedge, so a pillar near the far wall can
 # stay out of view until it is too late. The LiDAR sees it from the start line.
-# A candidate is a small cluster of returns that is:
+# A candidate is an object the EDGE WALK finds that is:
 #   * ahead of the car (x > 0) and closer than CAND_MAX_MM
 #   * inside the corridor: more than CAND_WALL_MM from both fitted wall lines
 #     (a missing side is placed CORRIDOR_MM from the other)
 #   * short of the wall ahead (front distance - CAND_WALL_MM)
-#   * no wider than CAND_MAX_WIDTH_MM (a pillar is 50 mm, 71 mm diagonal)
+#   * between CAND_MIN_WIDTH_MM and CAND_MAX_WIDTH_MM wide (a pillar is 50 mm,
+#     71 mm on the diagonal)
 # The nearest one is sent; the STM32 lines up with it so the camera can name
 # the colour, and dodges to the roomier side if it never does.
+
+
+def _filled_scan(ranges):
+    """The scan with short dropout runs interpolated - lazygo's fix_missing.
+
+    A bin is unusable when it is not finite or falls outside
+    [80, CAND_FAR_MM] mm. Note the upper bound is the LiDAR's own useful
+    range, NOT CAND_MAX_MM: the walk needs what is BEHIND a pillar as much as
+    the pillar itself, and the far wall of a 3 m arena sits well beyond any
+    distance a candidate may be accepted at. Clipping to CAND_MAX_MM here
+    would blank the background and the falling edge onto a pillar would never
+    fire. Distance is enforced later, on the object, where it belongs.
+
+    A run of at most CAND_FILL_GAP unusable bins between two usable ones is
+    filled in; across a step larger than CAND_EDGE_MM the nearer end is COPIED
+    rather than blended, so filling can never soften a real edge into a ramp
+    the walk would then miss. Longer runs are left NaN and break the walk,
+    which is what a hole that size is.
+    """
+    r = np.asarray(ranges, dtype=np.float64).copy()
+    good = np.isfinite(r) & (r > 80) & (r < CAND_FAR_MM)
+    r[~good] = np.nan
+    if CAND_FILL_GAP <= 0 or not good.any() or good.all():
+        return r
+    n = r.size
+    idx = np.nonzero(good)[0]
+    for a, b in zip(idx, np.roll(idx, -1)):          # each usable bin to the next
+        gap = int((b - a) % n)
+        if gap <= 1 or gap - 1 > CAND_FILL_GAP:
+            continue
+        ra, rb = float(r[a]), float(r[b])
+        edge = abs(ra - rb) > CAND_EDGE_MM
+        for k in range(1, gap):
+            t = k / gap
+            r[(a + k) % n] = (ra if t < 0.5 else rb) if edge else ra + (rb - ra) * t
+    return r
+
 
 def lidar_candidates(ranges, left_line, right_line):
     """[(x, y)] pillar-centre candidates in the LiDAR frame, nearest first.
 
-    Cluster FIRST, filter second: a wall is one long run of returns and is
-    thrown out whole by the width test. Filtering first would chop a wall
-    into short fragments at the cut lines, and those look like pillars.
+    The edge walk, ported from lazygo_wro2025 (control.py detectContrast).
+    Step through the forward wedge comparing every bin with the one CAND_SKIP
+    bins behind it. A drop of more than CAND_EDGE_MM opens an object; a rise
+    of more than CAND_EDGE_MM closes the one opened most recently. The angular
+    span between the two edges, times the range at its midpoint, is the
+    object's width - keep it when that is pillar-sized.
+
+    Why this and not the clustering it replaces: a wall never opens and closes
+    within a few bins, so it is rejected by construction instead of by a width
+    test applied afterwards. The cluster version joined returns within
+    CAND_GAP_MM of each other, so a pillar standing close to the wall behind
+    it merged into the wall run and was thrown away with it. An edge survives
+    that, because the step in RANGE is still there whatever is behind it.
+
+    The corridor gating, the front-wall cut and the face-to-centre correction
+    are unchanged, so what comes out is what unclassified() and the pX/pY and
+    uX/uY fields have always been handed: pillar CENTRES, nearest first.
     """
     if left_line is None and right_line is None:
         return []                                    # corner: no corridor to search in
-    r = np.asarray(ranges, dtype=np.float64)
-    ok = np.isfinite(r) & (r > 80) & (r < CAND_MAX_MM + 400)
-    idx = np.nonzero(ok)[0]
-    if idx.size == 0:
-        return []
-    x, y = r[idx] * _COS[idx], r[idx] * _SIN[idx]
-    fwd = r[(np.arange(-3, 4)) % 360]
+    r = _filled_scan(ranges)
+    look = int(round(CAND_LOOK_DEG))
+    skip = max(1, int(CAND_SKIP))
+    wedge = [b % 360 for b in range(-look, look + 1)]
+
+    fwd = np.asarray(ranges, dtype=np.float64)[(np.arange(-3, 4)) % 360]
     fwd = fwd[np.isfinite(fwd)]
     front = float(np.median(fwd)) if fwd.size else np.inf
 
-    clusters, cur = [], [0]
-    for k in range(1, idx.size):
-        if idx[k] - idx[cur[-1]] <= 3 and \
-                math.hypot(x[k] - x[cur[-1]], y[k] - y[cur[-1]]) < CAND_GAP_MM:
-            cur.append(k)
-        else:
-            clusters.append(cur); cur = [k]
-    clusters.append(cur)
-    if len(clusters) > 1 and idx[0] + 360 - idx[-1] <= 3 and \
-            math.hypot(x[0] - x[-1], y[0] - y[-1]) < CAND_GAP_MM:   # wrap at 0/359
-        clusters[0] = clusters[-1] + clusters[0]; clusters.pop()
-
-    out = []
-    for c in clusters:
-        if len(c) < CAND_MIN_POINTS:
+    out, opened = [], []
+    for k in range(skip, len(wedge)):
+        here, back = r[wedge[k]], r[wedge[k - skip]]
+        if not (np.isfinite(here) and np.isfinite(back)):
+            opened.clear()        # a hole this long: nothing still open is trustworthy
             continue
-        cx, cy = x[c], y[c]
-        if math.hypot(cx.max() - cx.min(), cy.max() - cy.min()) > CAND_MAX_WIDTH_MM:
-            continue                                  # wall run
-        mx, my = float(cx.mean()), float(cy.mean())
-        d = math.hypot(mx, my)
+        # An object cannot be wider than CAND_MAX_WIDTH_MM, so an edge opened
+        # further back than that many bins is not the start of one. Dropping it
+        # here is what stops a steep wall gradient - the box corner, where the
+        # ray stops hitting the wall ahead and starts hitting the wall beside,
+        # opens an edge and then simply never closes - from being popped much
+        # later by an unrelated rising edge. The cap is worked out at the
+        # OPENING range, not the current one: by the time an object closes, the
+        # bin under the cursor is the background behind it, which is further
+        # away and would give a cap too tight to let the object through.
+        while opened:
+            d_open = float(r[wedge[opened[0]]])
+            span_cap = CAND_MAX_WIDTH_MM / max(d_open, 1.0) / _BIN_RAD + skip
+            if np.isfinite(d_open) and k - opened[0] <= span_cap:
+                break
+            opened.pop(0)
+        step = float(here) - float(back)
+        if step < -CAND_EDGE_MM:                      # falling edge: object starts
+            if not opened or k - opened[-1] > skip:
+                opened.append(k)    # else: the same edge, seen skip times over
+            continue
+        if step <= CAND_EDGE_MM or not opened:        # rising edge closes the last one
+            continue
+        a = opened.pop()
+        mid = wedge[(a + k) // 2]
+        d = float(r[mid])
+        if not np.isfinite(d):
+            continue
+        if not CAND_MIN_WIDTH_MM < d * (k - a) * _BIN_RAD <= CAND_MAX_WIDTH_MM:
+            continue                                  # speckle, or too wide to be a pillar
+        mx, my = d * _COS[mid], d * _SIN[mid]
         if mx <= 0 or d > CAND_MAX_MM or mx > front - CAND_WALL_MM:
             continue
         if left_line is not None:
@@ -714,6 +788,39 @@ def lidar_candidates(ranges, left_line, right_line):
                     my + FACE_TO_CENTRE_MM * my / d))   # face -> centre
     out.sort(key=lambda p: math.hypot(*p))
     return out
+
+
+def match_pillar(cands, bearing_deg, tol_deg=None):
+    """The candidate the camera is looking at, or None - lazygo's fusion.
+
+    The LiDAR owns the geometry and the camera only says which way to look and
+    what colour is standing there. So rather than hunting the scan for returns
+    near the camera ray (locate_pillar, which is now the fallback), take the
+    object the edge walk already found whose bearing is closest to that ray.
+
+    Bearings are compared FROM THE CAMERA, which sits CAMERA_FWD_MM ahead of
+    the LiDAR - at 40 cm that parallax is several degrees.
+    """
+    if bearing_deg is None or not cands:
+        return None
+    tol = CAND_MATCH_DEG if tol_deg is None else tol_deg
+    best, best_err = None, float(tol)
+    for c in cands:
+        cx, cy = c[0] - CAMERA_FWD_MM, c[1]
+        if cx == 0.0 and cy == 0.0:
+            continue
+        err = abs((math.degrees(math.atan2(cy, cx)) - bearing_deg + 180.0) % 360.0 - 180.0)
+        if err < best_err:
+            best, best_err = c, err
+    return best
+
+
+def _fuse(cands, ranges, colour, bearing_deg, area):
+    """(x, y) for one camera detection: edge-walk match first, ray hunt second."""
+    if colour == COL_NONE:
+        return None
+    return match_pillar(cands, bearing_deg) or \
+        locate_pillar(ranges, bearing_deg, area)
 
 
 def unclassified(cands, classified_xy, match_mm=200.0):
@@ -1259,11 +1366,14 @@ def main():
                     cl, cr, yaw, lline, rline = cones_full(lidar._ranges)
                     cands = lidar_candidates(lidar._ranges, lline, rline)
                 v = vision_now(now)
-                pxy = (locate_pillar(lidar._ranges, v["bearing"], v["area"])
-                       if v["color"] != COL_NONE else None)
+                # colour from the camera, position from the LiDAR: the object
+                # the edge walk found on the camera's ray. locate_pillar is the
+                # fallback for a pillar the walk missed - too far, half behind
+                # the wall line, or in the shadow of a nearer one.
+                pxy = _fuse(cands, lidar._ranges, v["color"], v["bearing"], v["area"])
                 pX, pY = _pxy(pxy)
-                sxy = (locate_pillar(lidar._ranges, v["s_bearing"], v["s_area"])
-                       if v["s_color"] != COL_NONE else None)
+                sxy = _fuse(cands, lidar._ranges, v["s_color"],
+                            v["s_bearing"], v["s_area"])
                 sX, sY = _pxy(sxy)
                 uxy = unclassified(cands, pxy)
                 uX, uY = _pxy(uxy)
