@@ -92,7 +92,6 @@ class Spec:
 #   locate   turning a camera bearing + LiDAR range into a pillar position
 #   cand     LiDAR-only objects whose colour is not known yet (LazyGo edges)
 #   link     serial framing
-#   record   saving camera frames to take/ for training a detector
 
 PI_SPECS = [
     # ---- camera ----
@@ -230,15 +229,6 @@ PI_SPECS = [
          "+/- degrees when picking the 0/90/270 beams"),
     Spec("STM_PUSH_PER_LOOP", 4, 1, 40, "link", "i",
          "tuning lines sent to the STM32 per loop; keep well under SEND_HZ budget"),
-
-    # ---- recording: training images for the YOLO detector ----
-    Spec("RECORD_RUNS", True, 0, 1, "record", "b",
-         "save camera frames to take/ from GO until FINISHED / STOP"),
-    Spec("RECORD_HZ", 3.0, 0.2, 15.0, "record", "f",
-         "frames saved per second (the camera runs ~30; 3 Hz is ~250 images per 3-lap run)"),
-    Spec("RECORD_JPEG_Q", 92, 50, 100, "record", "i", "JPEG quality of the saved frames"),
-    Spec("RECORD_MIN_FREE_MB", 500, 50, 20000, "record", "i",
-         "stop saving when the SD card has less than this many MB free"),
 ]
 
 
