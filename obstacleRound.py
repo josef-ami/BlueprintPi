@@ -96,11 +96,26 @@ import serial
 
 import sensors.camera as camera
 from worldstate import SharedState
-from sensors.lidar import LidarThread
-from openRound import UART_PORT, UART_BAUD, load_tol, read_three, lidar_live, _u16
+from sensors.lidar import LidarThread, lidar_live, read_three, u16 as _u16
 
 import params as prm
 from nav import NavService
+
+# openRound.py used to define these and this file imported them from there.
+# They moved: the geometry helpers went to sensors/lidar.py and the port and
+# the tolerance became things openRound.main() resolves for itself, so there
+# was nothing left to import and this module would not load at all.
+
+_CFG = prm.read_config()
+UART_PORT = _CFG.get("serial", {}).get("port", "/dev/ttyACM0")
+UART_BAUD = _CFG.get("serial", {}).get("baud", 115200)
+
+
+def load_tol():
+    """BEARING_TOL_DEG from config.json - resolved exactly as openRound does."""
+    p = prm.PiParams()
+    p.set_many(_CFG.get("params", {}))
+    return int(p["BEARING_TOL_DEG"])
 
 # ---------------- fixed, not tunable ----------------
 PROC_SIZE   = (320, 240)     # detection resolution
