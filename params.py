@@ -22,14 +22,29 @@ owns the serial port, so a tuning change can never stall the 50 Hz frame feed.
 
 Readers are lock-free: values live in one dict that is REPLACED, never mutated,
 so a reader either sees the whole old set or the whole new one.
+
+PERSISTENCE - two files next to this one, both survive a power cut
+  vision_cal.json  the camera calibration: the Lab colour ranges, the Lab mat
+                   test, USE_LAB and AREA_K (CAL_KEYS). Written by
+                   calibrate_vision.py when you press FIT or SAVE, and by the
+                   Tune tab when you edit one of those values. "Revert Pi" never
+                   touches it - calibrate once and it stays.
+  tuning.json      every other Pi value, plus the STM32 table.
+Every change is saved automatically about a second after the last edit
+(AutoSave), so nothing is lost if the Pi is switched off without pressing Save.
+Writes are atomic (temp file, fsync, rename, fsync the directory), so a power
+cut mid-write leaves the previous file intact, never a truncated one.
 """
 
 import json
 import os
 import queue
 import threading
+import time
 
-TUNING_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tuning.json")
+_HERE = os.path.dirname(os.path.abspath(__file__))
+TUNING_PATH = os.path.join(_HERE, "tuning.json")
+CAL_PATH = os.path.join(_HERE, "vision_cal.json")
 
 
 # --------------------------------------------------------------------------
@@ -75,7 +90,7 @@ class Spec:
 #   filter   the "is this blob really a pillar" tests
 #   cone     the 45 deg wall fits that give lane offset and wall angle
 #   locate   turning a camera bearing + LiDAR range into a pillar position
-#   cand     LiDAR-only objects whose colour is not known yet
+#   cand     LiDAR-only objects whose colour is not known yet (LazyGo edges)
 #   link     serial framing
 
 PI_SPECS = [
@@ -95,25 +110,33 @@ PI_SPECS = [
          "bearing from the calibrated fisheye K/D (off = equidistant HFOV_DEG). "
          "Your K says +/-48 deg; hfov_deg says +/-80. Measure before trusting either"),
     Spec("SWAP_RB", True, 0, 1, "camera", "b", "swap red and blue channels"),
-    Spec("USE_LAB", False, 0, 1, "camera", "b",
+    Spec("SECOND_MIN_SEP_DEG", 4.0, 0, 30, "camera", "f",
+         "a second blob of the same colour closer than this in bearing is the first sign split in two"),
+    Spec("USE_LAB", True, 0, 1, "lab", "b",
          "classify pillars in CIE Lab instead of HSV. Lab separates red from green on "
          "the a channel without needing saturation, so a matte pillar under dim light "
-         "still passes. Set by calibrate_vision.py when you fit Lab ranges"),
+         "still passes. On by default; off falls back to the HSV ranges"),
 
     # ---- Lab ranges (OpenCV 8-bit: L 0-255, a/b 0-255 with 128 = neutral) ----
-    # Fitted by clicking pillars and mat in calibrate_vision.py. Defaults are
-    # deliberately wide-open placeholders - calibrate before switching USE_LAB on.
+    # Defaults are built from the rulebook colours, not placeholders:
+    #   red   RGB (238, 39, 55) -> Lab (132, 200, 171); in shadow ~ (65, 170, 151)
+    #   green RGB (68, 214, 44) -> Lab (193, 61, 194); in shadow ~ (101, 89, 167)
+    #   white mat -> (158..237, 128, 128)
+    # a separates red / green / mat; b >= 135 drops the magenta parking walls
+    # (b 67) and blue lines (b 28). Orange lines (a 183, b 199) do pass the red
+    # range - the aspect test (flat) removes them. calibrate_vision.py replaces
+    # all of these with values fitted on your mat and camera.
     Spec("RED_L_LO",   20, 0, 255, "lab", "i", "red pillar: lightness"),
-    Spec("RED_L_HI",  230, 0, 255, "lab", "i", ""),
+    Spec("RED_L_HI",  255, 0, 255, "lab", "i", ""),
     Spec("RED_A_LO",  150, 0, 255, "lab", "i", "a: >128 is red, <128 is green"),
     Spec("RED_A_HI",  255, 0, 255, "lab", "i", ""),
-    Spec("RED_B_LO",  128, 0, 255, "lab", "i", "b: >128 is yellow, <128 is blue"),
+    Spec("RED_B_LO",  135, 0, 255, "lab", "i", "b: >128 is yellow, <128 is blue"),
     Spec("RED_B_HI",  255, 0, 255, "lab", "i", ""),
     Spec("GREEN_L_LO",  20, 0, 255, "lab", "i", "green pillar: lightness"),
-    Spec("GREEN_L_HI", 230, 0, 255, "lab", "i", ""),
+    Spec("GREEN_L_HI", 255, 0, 255, "lab", "i", ""),
     Spec("GREEN_A_LO",   0, 0, 255, "lab", "i", ""),
     Spec("GREEN_A_HI", 110, 0, 255, "lab", "i", ""),
-    Spec("GREEN_B_LO",   0, 0, 255, "lab", "i", ""),
+    Spec("GREEN_B_LO", 135, 0, 255, "lab", "i", ""),
     Spec("GREEN_B_HI", 255, 0, 255, "lab", "i", ""),
     Spec("FLOOR_L_MIN", 120, 0, 255, "lab", "i",
          "white mat in Lab: at least this bright ..."),
@@ -153,7 +176,18 @@ PI_SPECS = [
     Spec("contrast_s_min", 50, 0, 255, "filter", "i",
          "blob saturation minus mat saturation under it"),
     Spec("bottom_margin_px", 3, 0, 40, "filter", "i",
-         "this close to the image bottom = base out of view, skip the floor tests"),
+         "this close to the ROI bottom = base out of view, skip the floor tests"),
+    # ---- LazyGo additions (detection_cam.py / helper/util.py) ----
+    Spec("roi_top_px", 60, 0, 479, "filter", "i",
+         "search band top row, 640x480 units (LazyGo 60): above it is the hall"),
+    Spec("roi_bottom_px", 440, 1, 480, "filter", "i",
+         "search band bottom row, 640x480 units (LazyGo 440): below it is the car"),
+    Spec("mask_blur_px", 3, 0, 15, "filter", "i",
+         "Gaussian blur on the colour mask then threshold 127 (0 = off)"),
+    Spec("min_box_h_px", 20, 0, 200, "filter", "i",
+         "a sign's box must be at least this tall, 640x480 units (LazyGo 30; reject H)"),
+    Spec("rank_by_height", True, 0, 1, "filter", "b",
+         "nearest sign = tallest box (LazyGo); off = largest area"),
 
     # ---- cone wall fit ----
     Spec("CONE_DEG", 45, 10, 120, "cone", "i", "width of each side cone"),
@@ -179,10 +213,14 @@ PI_SPECS = [
     Spec("CORRIDOR_MM", 1000.0, 300, 2000, "cand", "f", ""),
     Spec("CAND_MAX_MM", 1800.0, 300, 4000, "cand", "f", ""),
     Spec("CAND_WALL_MM", 70.0, 0, 400, "cand", "f", "keep this clear of a fitted wall"),
-    Spec("CAND_GAP_MM", 60.0, 10, 400, "cand", "f", "split clusters at this gap"),
+    Spec("CAND_EDGE_MM", 150.0, 50, 1500, "cand", "f",
+         "edge: range step that starts / ends an object (LazyGo 250; 150 catches signs near a wall)"),
+    Spec("CAND_MIN_WIDTH_MM", 25.0, 0, 200, "cand", "f",
+         "narrower than this is noise"),
     Spec("CAND_MAX_WIDTH_MM", 120.0, 40, 600, "cand", "f",
-         "wider than this is a wall run, not a pillar"),
-    Spec("CAND_MIN_POINTS", 2, 1, 30, "cand", "i", ""),
+         "wider than this is not a sign (50 mm, 71 diagonal)"),
+    Spec("CAND_FOV_DEG", 90, 20, 180, "cand", "i",
+         "search +/- this many degrees either side of forward"),
 
     # ---- link ----
     Spec("SEND_HZ", 50, 5, 200, "link", "i", "sensor frames per second"),
@@ -230,8 +268,10 @@ class PiParams:
         self._vals = new
         return out
 
-    def reset(self):
-        self._vals = {n: self.specs[n].default for n in self.order}
+    def reset(self, keep=()):
+        """Back to defaults, except the names in keep (the calibration)."""
+        self._vals = {n: (self._vals[n] if n in keep else self.specs[n].default)
+                      for n in self.order}
 
     def describe(self):
         return [self.specs[n].as_dict(self._vals[n]) for n in self.order]
@@ -262,7 +302,9 @@ class PiParams:
         p = self._vals
         return {k: p[k] for k in ("floor_s_max", "floor_v_min", "strip_px",
                                   "floor_below_min", "aspect_min", "solidity_min",
-                                  "contrast_s_min", "bottom_margin_px")}
+                                  "contrast_s_min", "bottom_margin_px",
+                                  "roi_top_px", "roi_bottom_px", "mask_blur_px",
+                                  "min_box_h_px", "rank_by_height")}
 
 
 # --------------------------------------------------------------------------
@@ -407,33 +449,124 @@ class StmParams:
         return rows
 
 
-STM_GROUPS = ["drive", "turn", "planner", "passing", "levelling",
-              "3-point", "corner exit", "safety", "link"]
+STM_GROUPS = ["drive", "colour trigger & turn", "planner", "passing", "levelling",
+              "reverse & re-plan", "corner exit", "safety", "link"]
 
 
 # --------------------------------------------------------------------------
-# persistence - one file, both halves
+# persistence - two files, atomic, auto-saved
 # --------------------------------------------------------------------------
 
-def load(pi: PiParams, stm: StmParams, path=TUNING_PATH):
-    """Returns a note for the log."""
-    try:
-        with open(path) as f:
-            saved = json.load(f)
-    except (OSError, ValueError) as e:
-        return f"[pi] no saved tuning ({type(e).__name__}) - using defaults"
-    n_pi = len(pi.set_many(saved.get("pi", {})))
-    stm.desired.update({k: float(v) for k, v in saved.get("stm32", {}).items()})
-    return f"[pi] loaded tuning: {n_pi} Pi, {len(saved.get('stm32', {}))} STM32"
+# the camera calibration: what calibrate_vision.py fits, kept in its own file
+CAL_KEYS = frozenset([s.name for s in PI_SPECS if s.group == "lab"] + ["AREA_K"])
 
 
-def save(pi: PiParams, stm: StmParams, path=TUNING_PATH):
-    """Atomic: write a temp file and rename, so a power cut cannot truncate it."""
-    data = {"pi": pi.snapshot(), "stm32": dict(stm.desired)}
+def _atomic_write(path, data):
+    """Temp file, fsync, rename, fsync the directory: after a power cut the
+    file is either the old one or the new one, never empty or half-written."""
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
         json.dump(data, f, indent=2, sort_keys=True)
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, path)
-    return f"[pi] saved tuning to {os.path.basename(path)}"
+    try:
+        fd = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass                       # not supported on this filesystem; rename still done
+
+
+def _read(path):
+    try:
+        with open(path) as f:
+            return json.load(f), None
+    except (OSError, ValueError) as e:
+        return None, type(e).__name__
+
+
+def calibrated():
+    """True once a vision_cal.json exists."""
+    return os.path.exists(CAL_PATH)
+
+
+def load(pi: PiParams, stm: StmParams, path=TUNING_PATH, cal_path=CAL_PATH):
+    """tuning.json first, then vision_cal.json on top (calibration always wins).
+    An older tuning.json that holds a real Lab fit (USE_LAB on) is honoured until
+    the first calibration file is written. Returns a note for the log."""
+    notes = []
+    saved, err = _read(path)
+    if saved is None:
+        notes.append(f"no saved tuning ({err})")
+    else:
+        vals = dict(saved.get("pi", {}))
+        if not vals.get("USE_LAB", False):
+            # an old tuning.json written before any Lab calibration: its Lab
+            # numbers are the old wide-open placeholders, not a fit - ignore them
+            # (and its USE_LAB = off). AREA_K is kept; it is measured separately.
+            vals = {k: v for k, v in vals.items() if k not in CAL_KEYS or k == "AREA_K"}
+        n_pi = len(pi.set_many(vals))
+        stm.desired.update({k: float(v) for k, v in saved.get("stm32", {}).items()})
+        notes.append(f"tuning: {n_pi} Pi, {len(saved.get('stm32', {}))} STM32")
+    cal, err = _read(cal_path)
+    if cal is None:
+        notes.append("NO vision_cal.json - Lab ranges are the rulebook defaults, "
+                     "run calibrate_vision.py once")
+    else:
+        vals = cal.get("pi", cal)
+        n = len(pi.set_many({k: v for k, v in vals.items() if k in CAL_KEYS}))
+        notes.append(f"calibration: {n} values from {os.path.basename(cal_path)}")
+    return "[pi] " + "; ".join(notes)
+
+
+def save_calibration(pi: PiParams, cal_path=CAL_PATH):
+    snap = pi.snapshot()
+    _atomic_write(cal_path, {"pi": {k: snap[k] for k in sorted(CAL_KEYS)},
+                             "saved": time.strftime("%Y-%m-%d %H:%M:%S")})
+    return f"[pi] saved calibration to {os.path.basename(cal_path)}"
+
+
+def save(pi: PiParams, stm: StmParams, path=TUNING_PATH, cal_path=CAL_PATH):
+    """Both files: calibration to vision_cal.json, the rest to tuning.json."""
+    snap = pi.snapshot()
+    _atomic_write(path, {"pi": {k: v for k, v in snap.items() if k not in CAL_KEYS},
+                         "stm32": dict(stm.desired)})
+    save_calibration(pi, cal_path)
+    return f"[pi] saved {os.path.basename(path)} + {os.path.basename(cal_path)}"
+
+
+class AutoSave:
+    """Saves both files DELAY seconds after the last change, off the caller's
+    thread, so a burst of edits is one write and nothing waits on the SD card."""
+
+    def __init__(self, pi, stm, delay=1.0, log=print):
+        self.pi, self.stm, self.delay, self.log = pi, stm, delay, log
+        self._timer = None
+        self._lock = threading.Lock()
+
+    def touch(self):
+        with self._lock:
+            if self._timer is not None:
+                self._timer.cancel()
+            self._timer = threading.Timer(self.delay, self._run)
+            self._timer.daemon = True
+            self._timer.start()
+
+    def _run(self):
+        with self._lock:
+            self._timer = None
+        try:
+            save(self.pi, self.stm)
+        except OSError as e:
+            self.log(f"[pi] AUTOSAVE FAILED: {e}")
+
+    def flush(self):
+        """Write now if a save is pending (call on shutdown)."""
+        with self._lock:
+            t, self._timer = self._timer, None
+        if t is not None:
+            t.cancel()
+            self._run()

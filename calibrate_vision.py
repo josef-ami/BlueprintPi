@@ -31,8 +31,11 @@ HOW TO USE IT
   4. Check the Detector panel: it runs the REAL find_pillars() on the live
      frame and shows what it accepts, and for anything it rejects, which test
      said no (A flat, S ragged, F not on mat, C low contrast).
-  5. Press SAVE. Writes tuning.json and turns USE_LAB on, so obstacleRound.py
-     picks it up next time it starts.
+  5. That's it: FIT already wrote the result to vision_cal.json (atomic, synced
+     to the SD card), so it survives the Pi being switched off, and
+     obstacleRound.py loads it on every start. SAVE writes it again by hand.
+     Calibrate ONCE per venue / lighting; nothing else overwrites this file -
+     not tuning.json, not "Revert Pi" on the race page.
 
 AREA_K
   The firmware falls back to a distance estimate from blob area when no LiDAR
@@ -49,7 +52,6 @@ firmware still uses.
 
 import argparse
 import math
-import os
 import threading
 import time
 
@@ -59,7 +61,6 @@ from flask import Flask, Response, jsonify, request
 
 import obstacleRound as ob
 import params as prm
-import sensors.camera as camera
 
 PORT = 5000
 PATCH = 5                 # click samples a PATCH x PATCH box, in detection pixels
@@ -229,7 +230,12 @@ def fit():
     }
     ob.PI.set_many(vals)
     ob.sync_globals()
-    text = "fitted and applied live" + (" - " + "; ".join(sorted(set(warn))) if warn else "")
+    try:
+        prm.save_calibration(ob.PI)
+        saved = "fitted, applied live and saved to vision_cal.json"
+    except OSError as e:
+        saved = f"fitted and applied live, but NOT saved: {e}"
+    text = saved + (" - " + "; ".join(sorted(set(warn))) if warn else "")
     if gap < 12:
         text += ". WARNING: pillars are barely more colourful than the mat - " \
                 "check exposure and white balance"
@@ -240,7 +246,7 @@ def fit():
 # what the real detector makes of the current frame
 # --------------------------------------------------------------------------
 
-REASON = {"A": "too flat (aspect)", "S": "ragged (solidity)",
+REASON = {"H": "too short (box height)", "A": "too flat (aspect)", "S": "ragged (solidity)",
           "F": "not standing on the mat", "C": "too little colour vs the mat"}
 
 
@@ -374,7 +380,7 @@ input[type=number]{width:70px;background:#0d0d0d;color:var(--fg);border:1px soli
   </div>
   <div style="margin-top:10px">
     <button id=fit onclick="dofit()">FIT</button>
-    <button id=save onclick="save()">SAVE to tuning.json</button>
+    <button id=save onclick="save()">SAVE to vision_cal.json</button>
   </div>
   <div id=msg class=dim></div>
 </div>
@@ -520,6 +526,10 @@ def area_k_from_click(s):
             k = area_k["dist_mm"] * math.sqrt(b["area"])
             ob.PI.set("AREA_K", k)
             ob.sync_globals()
+            try:
+                prm.save_calibration(ob.PI)
+            except OSError:
+                pass
             area_k["result"] = k
             return {"area": b["area"], "dist": int(area_k["dist_mm"]), "k": int(k)}
     return None
@@ -571,10 +581,7 @@ def api_fit():
     return jsonify({"ok": ok, "msg": text})
 
 
-LAB_NAMES = ["USE_LAB", "RED_L_LO", "RED_L_HI", "RED_A_LO", "RED_A_HI",
-             "RED_B_LO", "RED_B_HI", "GREEN_L_LO", "GREEN_L_HI", "GREEN_A_LO",
-             "GREEN_A_HI", "GREEN_B_LO", "GREEN_B_HI", "FLOOR_L_MIN",
-             "FLOOR_AB_TOL", "LAB_CHROMA_MIN", "AREA_K"]
+LAB_NAMES = ["USE_LAB"] + sorted(n for n in prm.CAL_KEYS if n != "USE_LAB")
 
 
 @app.route("/api/state")
@@ -590,17 +597,13 @@ def api_state():
 
 @app.route("/api/save", methods=["POST"])
 def api_save():
-    """Load first, then save: tuning.json also holds the STM32 values, and
-    writing without reading them back would wipe the firmware's tuning."""
-    if not ob.PI["USE_LAB"]:
-        return jsonify({"ok": False, "msg": "press FIT first"}), 400
-    keep = prm.PiParams(prm.PI_SPECS)
-    prm.load(keep, ob.STM)                     # refills ob.STM.desired from the file
+    """Writes vision_cal.json only - tuning.json (the rest of the Pi values and
+    the STM32 table) is never touched by this tool."""
     try:
-        text = prm.save(ob.PI, ob.STM)
+        text = prm.save_calibration(ob.PI)
     except OSError as e:
         return jsonify({"ok": False, "msg": f"could not save: {e}"}), 500
-    return jsonify({"ok": True, "msg": text + " - USE_LAB is on"})
+    return jsonify({"ok": True, "msg": text + (" - USE_LAB is on" if ob.PI["USE_LAB"] else "")})
 
 
 # --------------------------------------------------------------------------
@@ -630,7 +633,7 @@ def main():
             print(f"[cal] lidar unavailable ({e}) - not needed for Lab fitting")
             lidar = None
 
-    print(f"[cal] open http://<pi>:{PORT}   saves to {prm.TUNING_PATH}")
+    print(f"[cal] open http://<pi>:{PORT}   saves to {prm.CAL_PATH}")
     try:
         app.run(host="0.0.0.0", port=PORT, threaded=True, debug=False, use_reloader=False)
     finally:

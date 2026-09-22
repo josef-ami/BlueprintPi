@@ -33,38 +33,33 @@ TUNING - WHO OWNS WHAT
   writes sensor frames, so tuning can never stall the 50 Hz feed. Nothing in
   this file blocks on the serial port.
 
-Wire frame - one ASCII line per send, SEND_HZ times a second:
+Wire frame - one ASCII line per send, SEND_HZ times a second, 18 fields:
 
-    left,front,right,rev,color,err,area,vseq,coneL,coneR,wallAng,pX,pY,uX,uY\\n
+    left,front,right,rev,color,err,area,vseq,coneL,coneR,wallAng,pX,pY,uX,uY,sColor,sX,sY\n
 
   left/front/right  mm at 90 / 0 / 270 deg, 65535 = no return   (as openRound)
   rev               lidar revolution counter                     (as openRound)
-  color             1 = red, 0 = green, 2 = none                 (as tracker.py)
-  err               pillar centre x - 320, in 640-px frame units, + = right
-  area              largest ACCEPTED pillar area, 320x240 detection pixels
-  vseq              camera frame counter; STM32 runs its pillar PD only
-                    when it changes
+  color             first sign: 1 = red, 0 = green, 2 = none
+  err               first sign centre x - 320, 640-px frame, + = right (debug;
+                    the slot a rear ToF will use later)
+  area              first sign blob area, 320x240 detection pixels (debug)
+  vseq              camera frame counter (debug)
   coneL / coneR     perpendicular mm to the left / right wall, line-fitted
                     over a 45 deg LiDAR cone each side; 65535 = no fit
   wallAng           car yaw to the walls x10 (deci-deg), + = pointing left;
                     32767 = no fit
-  pX / pY           chosen pillar centre, mm from the LiDAR (x fwd, y left):
-                    camera bearing (fisheye-undistorted) + LiDAR range on
-                    that ray; 32767 = none
-  uX / uY           nearest LiDAR object inside the corridor that is NOT the
-                    camera's pillar (colour unknown yet); 32767 = none
-  sColor            SECOND pillar's colour - the next-largest accepted blob,
-                    i.e. one that is further away but still seen. 2 = none
-  sX / sY           where it is, same frame as pX/pY. Approaching a corner this
-                    is almost always the first pillar of the NEXT straight, and
-                    the firmware shapes the corner from its colour: green means
-                    go further forward and take it wide, red means turn early
-                    and take it short.
+  pX / pY           first sign centre, mm from the LiDAR (x fwd, y left):
+                    camera bearing + LiDAR range on that ray; 32767 = none
+  uX / uY           nearest LiDAR object in the corridor the camera has NOT
+                    coloured (LazyGo edge detector); 32767 = none
+  sColor / sX / sY  second sign - the next accepted blob that is a different
+                    sign from the first. The firmware tracks it like the first,
+                    and uses its colour across a corner to pick the exit side.
 
 Commands on the same serial line:
     S            START            X            STOP
     N <name> <v> set a firmware parameter       ?P  dump the table
-    ?V           firmware version / boot id     C   recompute derived values
+    ?V           firmware version / boot id
 Replies from the firmware start with '!' (parameters) or '#' (log).
 
 Silence rules: lidar stale -> no frames are sent (commands still are).
@@ -82,7 +77,6 @@ A NOTE ON THE CAMERA MODEL
 
 import collections
 import math
-import os
 import queue
 import threading
 import time
@@ -158,9 +152,11 @@ FACE_TO_CENTRE_MM = 25.0
 CORRIDOR_MM = 1000.0
 CAND_MAX_MM = 1800.0
 CAND_WALL_MM = 70.0
-CAND_GAP_MM = 60.0
+CAND_EDGE_MM = 150.0
+CAND_MIN_WIDTH_MM = 25.0
 CAND_MAX_WIDTH_MM = 120.0
-CAND_MIN_POINTS = 2
+CAND_FOV_DEG = 90
+SECOND_MIN_SEP_DEG = 4.0
 SEND_HZ = 50
 CMD_REPEAT = 3
 BEARING_TOL_DEG = 2
@@ -255,18 +251,6 @@ def bearing_from_px(cx, cy):
 # camera thread
 # --------------------------------------------------------------------------
 
-def largest(mask):
-    """Largest contour above MIN_AREA_PROC, no shape checks.
-    Kept for anything that imported it; the robot uses find_pillars()."""
-    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    best, area = None, 0.0
-    for c in cnts:
-        a = cv2.contourArea(c)
-        if a > area and a >= MIN_AREA_PROC:
-            best, area = c, a
-    return best, area
-
-
 # ---- pillar isolation by floor / pillar contrast -------------------------
 #
 # A real pillar is an upright, solid, saturated block STANDING ON the white
@@ -339,17 +323,24 @@ def colour_mask(hsv, lab, name):
     return camera.build_mask(hsv, HSV_CFG[name])
 
 
-def check_pillar(cnt, area, hsv, lab, floor, pf):
-    """None if the blob is a pillar, else a one-letter reject code (A/S/F/C)."""
+def check_pillar(cnt, area, hsv, lab, floor, pf, bottom=None, ch=None):
+    """None if the blob is a pillar, else a one-letter reject code (H/A/S/F/C).
+
+    bottom = the lowest usable image row (the ROI bottom); ch = the frame's
+    chroma image, computed once per frame by find_pillars()."""
     x, y, w, h = cv2.boundingRect(cnt)
+    if h < pf["min_box_h_px"] * PROC_SIZE[1] / float(camera.FRAME_H):
+        return "H"                                    # LazyGo: too short to be a sign
     if h < pf["aspect_min"] * w:
         return "A"
     if area < pf["solidity_min"] * w * h:
         return "S"
 
     H, W = floor.shape
+    if bottom is None:
+        bottom = H
     y0 = y + h
-    if y0 >= H - pf["bottom_margin_px"]:
+    if y0 >= bottom - pf["bottom_margin_px"]:
         return None                                   # base out of view: too close to check
 
     # centre 60 % of the width, so a wall edge next to the pillar can't count
@@ -363,7 +354,8 @@ def check_pillar(cnt, area, hsv, lab, floor, pf):
     blob = np.zeros((h, w), np.uint8)
     cv2.drawContours(blob, [cnt - (x, y)], -1, 255, -1)
     if USE_LAB:
-        ch = chroma(lab)
+        if ch is None:
+            ch = chroma(lab)
         c_in = cv2.mean(ch[y:y + h, x:x + w], mask=blob)[0]
         c_floor = cv2.mean(ch[y0:y1, xa:xb], mask=strip)[0]
         if c_in - c_floor < LAB_CHROMA_MIN:
@@ -376,32 +368,69 @@ def check_pillar(cnt, area, hsv, lab, floor, pf):
     return None
 
 
+# ---- LazyGo additions (lazybot/detection_cam.py + helper/util.py) --------
+#
+#   ROI         only rows roi_top_px .. roi_bottom_px (640x480 units) are
+#               searched: above is the hall beyond the walls, below is the
+#               car's own nose. LazyGo uses 60 .. 440.
+#   mask blur   Gaussian blur on the colour mask, re-thresholded at 127:
+#               rounds ragged edges and fills pinholes before contours.
+#   min height  a box shorter than min_box_h_px (640x480 units) is not a sign
+#               (reject code H). LazyGo uses 30 px on the robot, 12 in sim.
+#   rank        "closest = tallest box": a sign's height in the image falls
+#               off with distance and is not cut by a side occluder the way
+#               its area is, so it orders signs better than area does.
+
+def roi_rows(pf, h):
+    """(top, bottom) rows of the search band at detection resolution h."""
+    k = h / float(camera.FRAME_H)
+    top = max(0, min(h - 1, int(pf["roi_top_px"] * k)))
+    bot = max(top + 1, min(h, int(pf["roi_bottom_px"] * k)))
+    return top, bot
+
+
+def lazygo_mask(m, pf, top, bot):
+    """ROI + optional blur/threshold, LazyGo style."""
+    if top > 0:
+        m[:top] = 0
+    if bot < m.shape[0]:
+        m[bot:] = 0
+    k = int(pf["mask_blur_px"])
+    if k > 0:
+        k = k + 1 if k % 2 == 0 else k
+        m = cv2.GaussianBlur(m, (k, k), 0)
+        _, m = cv2.threshold(m, 127, 255, cv2.THRESH_BINARY)
+    return m
+
+
 def find_pillars(hsv, lab, pf):
     """(accepted, candidates, floor).
 
-    accepted = every blob that passed, as (cnt, area, code), LARGEST FIRST.
-    The firmware wants two of them: the nearest pillar to steer around, and the
-    next one back. On the run up to a corner that second pillar is almost
-    always the first pillar of the next straight, and its colour is what decides
-    whether the corner is taken short or wide - see planCornerExit() in the
-    firmware. Sending only the largest blob, as this did before, made that
-    pillar invisible exactly when it mattered.
+    accepted = every blob that passed, as (cnt, area, code), NEAREST FIRST
+    (tallest box when rank_by_height is on, else largest area). The firmware
+    wants two of them: the nearest sign to steer around, and the next one back,
+    which approaching a corner is usually the next straight's first sign.
 
     candidates = [(cnt, area, code, reject_or_None)] for the debug overlay."""
     floor = floor_mask(hsv, lab, pf)
+    top, bot = roi_rows(pf, floor.shape[0])
+    ch = chroma(lab) if USE_LAB else None             # once per frame, not per blob
     cands, accepted = [], []
     for name in ("RED", "GREEN"):
-        cnts, _ = cv2.findContours(colour_mask(hsv, lab, name),
-                                   cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        m = lazygo_mask(colour_mask(hsv, lab, name), pf, top, bot)
+        cnts, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         for c in cnts:
             a = cv2.contourArea(c)
             if a < MIN_AREA_PROC:
                 continue
-            why = check_pillar(c, a, hsv, lab, floor, pf)
+            why = check_pillar(c, a, hsv, lab, floor, pf, bottom=bot, ch=ch)
             cands.append((c, a, CODE[name], why))
             if why is None:
                 accepted.append((c, a, CODE[name]))
-    accepted.sort(key=lambda t: -t[1])
+    if pf["rank_by_height"]:
+        accepted.sort(key=lambda t: (-cv2.boundingRect(t[0])[3], -t[1]))
+    else:
+        accepted.sort(key=lambda t: -t[1])
     return accepted, cands, floor
 
 
@@ -456,10 +485,16 @@ class VisionThread(threading.Thread):
                     color, err, area, box, bearing = COL_NONE, 0, 0, None, None
                 else:
                     color, err, area, box, bearing = describe(accepted[0])
-                if len(accepted) > 1:
-                    s_color, _, s_area, s_box, s_bearing = describe(accepted[1])
-                else:
-                    s_color, s_area, s_box, s_bearing = COL_NONE, 0, None, None
+                # second sign: the next accepted blob that is not the first
+                # one split in two (same colour, bearing within SECOND_MIN_SEP_DEG)
+                s_color, s_area, s_box, s_bearing = COL_NONE, 0, None, None
+                for hit in accepted[1:]:
+                    c2, _, a2, b2, br2 = describe(hit)
+                    if (c2 == color and bearing is not None and br2 is not None
+                            and abs(br2 - bearing) < SECOND_MIN_SEP_DEG):
+                        continue
+                    s_color, s_area, s_box, s_bearing = c2, a2, b2, br2
+                    break
 
                 with lock:
                     vision.update(color=color, err=err, area=int(area),
@@ -551,11 +586,6 @@ def fit_wall(ranges, centre_deg):
             float(m), float(c))                  # the line y = m x + c (LiDAR frame)
 
 
-def cones(ranges):
-    """(coneL_mm, coneR_mm, yaw_deg) - any of them None when not fitted."""
-    return cones_full(ranges)[:3]
-
-
 def cones_full(ranges):
     """cones() plus the two fitted wall lines (m, c) or None, for pillar search."""
     L = fit_wall(ranges, 90)
@@ -628,76 +658,101 @@ def locate_pillar(ranges, bearing_deg, area, cam_fwd=None):
 # LiDAR pillar candidates - objects inside the corridor, colour unknown
 # --------------------------------------------------------------------------
 #
-# The camera only covers a limited wedge, so a pillar near the far wall can
-# stay out of view until it is too late. The LiDAR sees it from the start line.
-# A candidate is a small cluster of returns that is:
-#   * ahead of the car (x > 0) and closer than CAND_MAX_MM
-#   * inside the corridor: more than CAND_WALL_MM from both fitted wall lines
-#     (a missing side is placed CORRIDOR_MM from the other)
-#   * short of the wall ahead (front distance - CAND_WALL_MM)
-#   * no wider than CAND_MAX_WIDTH_MM (a pillar is 50 mm, 71 mm diagonal)
-# The nearest one is sent; the STM32 lines up with it so the camera can name
-# the colour, and dodges to the roomier side if it never does.
+# The camera only covers about +/-48 deg, so a sign near the far wall can stay
+# out of view until it is too late. The LiDAR sees it from much further back.
+#
+# Detection is LazyGo's edge-stack detector (lazybot/control.py,
+# detectContrast()), adapted to these 1-degree bins. Sweeping the scan from
+# right to left, a sign is a VALLEY: the range drops sharply where it starts
+# and rises sharply where it ends.
+#   drop  > CAND_EDGE_MM   push the bin index on a stack   (object starts)
+#   rise  > CAND_EDGE_MM   pop the last drop: the bins in between are one
+#                          object; keep it if its width is CAND_MIN_WIDTH_MM ..
+#                          CAND_MAX_WIDTH_MM (a sign is 50 mm, 71 diagonal)
+# Matching drops to rises with a stack is bracket matching (a pushdown
+# automaton), so a sign standing in front of a recess still closes correctly.
+# A wall never has a deep step on BOTH sides, so it can never pass - unlike
+# gap clustering, which could chop a far, oblique wall into sign-sized pieces.
+#
+# Survivors must then be ahead, closer than CAND_MAX_MM, and more than
+# CAND_WALL_MM inside both fitted wall lines (a missing
+# side is placed CORRIDOR_MM from the other): that removes signs of other
+# straights seen across a corner. The nearest one that the camera has not
+# already coloured is sent as uX/uY; the STM32 lines up with it so the camera
+# can name it, and goes to the roomier side if it never does.
+
+_FAR_MM = 4000.0          # an empty bin reads as "far background" for the edge test
+
+
+def _filled_ranges(r, idx):
+    """Ranges along idx with short dropouts (<= 2 bins) filled from the nearest
+    valid neighbour, and longer ones treated as far background (LazyGo
+    fix_missing(), simplified)."""
+    seq = r[idx].copy()
+    bad = ~np.isfinite(seq) | (seq <= 80)
+    n = seq.size
+    out = seq.copy()
+    for i in np.nonzero(bad)[0]:
+        best = None
+        for off in (1, -1, 2, -2):
+            j = i + off
+            if 0 <= j < n and not bad[j]:
+                best = seq[j]
+                break
+        out[i] = best if best is not None else _FAR_MM
+    return out
+
 
 def lidar_candidates(ranges, left_line, right_line):
-    """[(x, y)] pillar-centre candidates in the LiDAR frame, nearest first.
-
-    Cluster FIRST, filter second: a wall is one long run of returns and is
-    thrown out whole by the width test. Filtering first would chop a wall
-    into short fragments at the cut lines, and those look like pillars.
-    """
+    """[(x, y)] sign-centre candidates in the LiDAR frame, nearest first."""
     if left_line is None and right_line is None:
         return []                                    # corner: no corridor to search in
     r = np.asarray(ranges, dtype=np.float64)
-    ok = np.isfinite(r) & (r > 80) & (r < CAND_MAX_MM + 400)
-    idx = np.nonzero(ok)[0]
-    if idx.size == 0:
-        return []
-    x, y = r[idx] * _COS[idx], r[idx] * _SIN[idx]
-    fwd = r[(np.arange(-3, 4)) % 360]
-    fwd = fwd[np.isfinite(fwd)]
-    front = float(np.median(fwd)) if fwd.size else np.inf
+    fov = int(CAND_FOV_DEG)
+    idx = np.arange(-fov, fov + 1) % 360             # right (270..359) through left (..90)
+    d = _filled_ranges(r, idx)
+    x, y = d * _COS[idx], d * _SIN[idx]
 
-    clusters, cur = [], [0]
-    for k in range(1, idx.size):
-        if idx[k] - idx[cur[-1]] <= 3 and \
-                math.hypot(x[k] - x[cur[-1]], y[k] - y[cur[-1]]) < CAND_GAP_MM:
-            cur.append(k)
-        else:
-            clusters.append(cur); cur = [k]
-    clusters.append(cur)
-    if len(clusters) > 1 and idx[0] + 360 - idx[-1] <= 3 and \
-            math.hypot(x[0] - x[-1], y[0] - y[-1]) < CAND_GAP_MM:   # wrap at 0/359
-        clusters[0] = clusters[-1] + clusters[0]; clusters.pop()
-
-    out = []
-    for c in clusters:
-        if len(c) < CAND_MIN_POINTS:
-            continue
-        cx, cy = x[c], y[c]
-        if math.hypot(cx.max() - cx.min(), cy.max() - cy.min()) > CAND_MAX_WIDTH_MM:
-            continue                                  # wall run
-        mx, my = float(cx.mean()), float(cy.mean())
-        d = math.hypot(mx, my)
-        if mx <= 0 or d > CAND_MAX_MM or mx > front - CAND_WALL_MM:
-            continue
-        if left_line is not None:
-            if my > left_line[0] * mx + left_line[1] - CAND_WALL_MM: continue
-        elif my > right_line[0] * mx + right_line[1] + CORRIDOR_MM - CAND_WALL_MM: continue
-        if right_line is not None:
-            if my < right_line[0] * mx + right_line[1] + CAND_WALL_MM: continue
-        elif my < left_line[0] * mx + left_line[1] - CORRIDOR_MM + CAND_WALL_MM: continue
-        out.append((mx + FACE_TO_CENTRE_MM * mx / d,
-                    my + FACE_TO_CENTRE_MM * my / d))   # face -> centre
+    out, stack = [], []
+    for i in range(1, d.size):
+        step = d[i] - d[i - 1]
+        if step < -CAND_EDGE_MM:                     # falling edge: object starts
+            stack.append(i)
+        elif step > CAND_EDGE_MM and stack:          # rising edge: object ends
+            j = stack.pop()
+            seg = slice(j, i)                        # bins j .. i-1
+            if d[j:i].max() >= _FAR_MM:
+                continue
+            mid_r = float(np.median(d[seg]))
+            width = math.hypot(x[i - 1] - x[j], y[i - 1] - y[j]) + mid_r * math.radians(1.0)
+            if not (CAND_MIN_WIDTH_MM <= width <= CAND_MAX_WIDTH_MM):
+                continue
+            mx, my = float(x[seg].mean()), float(y[seg].mean())
+            dist = math.hypot(mx, my)
+            # no "short of the wall ahead" test: the depth step on both sides
+            # already proves there is background behind it (and the old front-
+            # beam test rejected a sign straight ahead, whose own face IS the
+            # front beam)
+            if mx <= 0 or dist > CAND_MAX_MM:
+                continue
+            if left_line is not None:
+                if my > left_line[0] * mx + left_line[1] - CAND_WALL_MM: continue
+            elif my > right_line[0] * mx + right_line[1] + CORRIDOR_MM - CAND_WALL_MM: continue
+            if right_line is not None:
+                if my < right_line[0] * mx + right_line[1] + CAND_WALL_MM: continue
+            elif my < left_line[0] * mx + left_line[1] - CORRIDOR_MM + CAND_WALL_MM: continue
+            out.append((mx + FACE_TO_CENTRE_MM * mx / dist,
+                        my + FACE_TO_CENTRE_MM * my / dist))   # face -> centre
     out.sort(key=lambda p: math.hypot(*p))
     return out
 
 
-def unclassified(cands, classified_xy, match_mm=200.0):
-    """Nearest candidate that is NOT the pillar the camera already named."""
+def unclassified(cands, classified, match_mm=200.0):
+    """Nearest candidate that is NOT a sign the camera already named.
+    classified = the located first and second signs (either may be None)."""
+    known = [p for p in classified if p is not None]
     for c in cands:
-        if classified_xy is None or \
-                math.hypot(c[0] - classified_xy[0], c[1] - classified_xy[1]) > match_mm:
+        if all(math.hypot(c[0] - k[0], c[1] - k[1]) > match_mm for k in known):
             return c
     return None
 
@@ -732,10 +787,12 @@ def track_stm32(line):
     elif s.startswith("next straight"):
         stm_state["exit"] = s.replace("next straight ", "")
     elif s.startswith("lane heading"):
-        stm_state["lane"] = s.split()[-1]
+        stm_state["lane"] = s.split()[2]             # "lane heading <deg> turned <deg>"
     elif s.startswith("RECOVER"):
         stm_state["state"] = "RECOVER"
-    elif s.startswith("DRIVE") or s.startswith("recover"):
+    elif s.startswith("BACKOFF"):
+        stm_state["state"] = "BACKOFF (reverse and re-plan)"
+    elif s.startswith("DRIVE") or s.startswith("recover") or s.startswith("backoff"):
         stm_state["state"] = "RUNNING"
     elif s.startswith("FINAL_STRAIGHT"):
         stm_state["state"] = "FINAL STRAIGHT"
@@ -805,7 +862,7 @@ td{padding:2px 14px 2px 0}td.k{color:var(--dim)}
     <label><input type=checkbox onchange="cam.src=this.checked?'/stream?view=floor':'/stream'">
     show floor mask</label>
     <div class=dim style="font-size:12px">grey boxes = rejected:
-      A flat &middot; S ragged &middot; F not on mat &middot; C low contrast</div></div>
+      H too short &middot; A flat &middot; S ragged &middot; F not on mat &middot; C low contrast</div></div>
   <div style="min-width:300px;flex:1">
     <div class=state id=state>&hellip;</div>
     <div class=big id=corner></div>
@@ -846,10 +903,11 @@ const f=x=>x===null||x===undefined?'--':Math.round(x);
 async function cmd(c){await fetch('/api/'+c,{method:'POST'});}
 
 // ---- Tune ----
-const GROUPS={camera:'Camera',hsv:'HSV colour ranges',filter:'Pillar filter',
-  cone:'Wall cone fit',locate:'Pillar location',cand:'LiDAR candidates',link:'Link'};
-const SGROUPS=['Drive & heading','Corner trigger & arc','Lane planner','Passing a pillar',
-  'Wall levelling','3-point corner','Corner exit','Safety','Link'];
+const GROUPS={camera:'Camera',hsv:'HSV colour ranges',lab:'Lab colour ranges',
+  filter:'Pillar filter (incl. LazyGo ROI / height)',
+  cone:'Wall cone fit',locate:'Pillar location',cand:'LiDAR candidates (LazyGo edges)',link:'Link'};
+const SGROUPS=['Drive & heading','Colour trigger & turn','Lane planner','Passing a pillar',
+  'Wall levelling','Reverse & re-plan','Corner exit','Safety','Link'];
 
 function field(p,side){
   const id=side+':'+p.name, d=document.createElement('div'); d.className='p';
@@ -1132,11 +1190,10 @@ handle_rx.pushed = False
 
 
 def main():
-    msg = prm.load(PI, STM)
+    PI.set("BEARING_TOL_DEG", load_tol())      # config.json first ...
+    msg = prm.load(PI, STM)                    # ... tuning.json overrides it if it has one
     sync_globals()
     note(msg)
-    PI.set("BEARING_TOL_DEG", load_tol())      # honour config.json unless tuning.json overrode it
-    sync_globals()
 
     try:
         ser = serial.Serial(UART_PORT, UART_BAUD, timeout=0, write_timeout=0)
@@ -1215,7 +1272,7 @@ def main():
                 sxy = (locate_pillar(lidar._ranges, v["s_bearing"], v["s_area"])
                        if v["s_color"] != COL_NONE else None)
                 sX, sY = _pxy(sxy)
-                uxy = unclassified(cands, pxy)
+                uxy = unclassified(cands, (pxy, sxy))
                 uX, uY = _pxy(uxy)
                 line = (f"{_u16(l)},{_u16(f)},{_u16(r)},{lidar.rev},"
                         f"{v['color']},{v['err']},{v['area']},{v['seq']},"
