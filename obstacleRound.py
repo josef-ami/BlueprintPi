@@ -267,8 +267,14 @@ def _principal_point():
 def bearing_from_px(cx, cy):
     """Blob centre in 640x480 pixels -> bearing in degrees, + = left."""
     if USE_INTRINSICS:
-        return camera.px_to_bearing(cx, camera.FRAME_W, HFOV_DEG, cy=cy,
-                                    offset_deg=CAMERA_OFFSET_DEG)
+        # camera.px_to_bearing() takes a PiParams now and this module mirrors
+        # its parameters into globals instead, so go to the fisheye model
+        # directly. It returns None when there is no calibration on disk -
+        # fall through to the equidistant model below rather than crash, which
+        # is what camera.px_to_bearing() does with a PiParams.
+        b = camera.px_to_bearing_fisheye(cx, cy, CAMERA_OFFSET_DEG)
+        if b is not None:
+            return b
     ppx, ppy = _principal_point()
     fx = (camera.FRAME_W / 2.0) / math.radians(HFOV_DEG / 2.0)
     dx, dy = cx - ppx, cy - ppy
