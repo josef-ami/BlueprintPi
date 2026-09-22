@@ -251,7 +251,7 @@ def detector_report():
         return {"ok": False, "blobs": []}
     small = cv2.resize(frame, ob.PROC_SIZE, interpolation=cv2.INTER_AREA)
     hsv, lab = ob.colour_spaces(small)
-    accepted, cands, _ = ob.find_pillars(hsv, lab, ob.PILLAR_FILTER)
+    best, cands, _ = ob.find_pillars(hsv, lab, ob.PILLAR_FILTER)
     blobs = []
     for cnt, a, code, why in sorted(cands, key=lambda c: -c[1])[:8]:
         x, y, w, h = cv2.boundingRect(cnt)
@@ -260,11 +260,8 @@ def detector_report():
                       "verdict": "ACCEPTED" if why is None else REASON.get(why, why)})
     return {"ok": True, "space": "Lab" if ob.USE_LAB else "HSV",
             "min_area": ob.MIN_AREA_PROC,
-            # what the firmware would actually receive this frame
-            "primary": None if not accepted else
-                       {"colour": ob.NAMES[accepted[0][2]], "area": int(accepted[0][1])},
-            "secondary": None if len(accepted) < 2 else
-                         {"colour": ob.NAMES[accepted[1][2]], "area": int(accepted[1][1])},
+            "best": None if best is None else
+                    {"colour": ob.NAMES[best[2]], "area": int(best[1])},
             "blobs": blobs}
 
 
@@ -293,16 +290,13 @@ def render(mode):
         out = cv2.applyColorMap(ch, cv2.COLORMAP_VIRIDIS)
     else:
         out = cv2.cvtColor(small, cv2.COLOR_RGB2BGR)
-        accepted, cands, _ = ob.find_pillars(hsv, lab, ob.PILLAR_FILTER)
-        rank = {id(t[0]): i for i, t in enumerate(accepted[:2])}
+        best, cands, _ = ob.find_pillars(hsv, lab, ob.PILLAR_FILTER)
         for cnt, a, code, why in cands:
             x, y, w, h = cv2.boundingRect(cnt)
             col = (140, 140, 140) if why else ob.BOX_BGR[code]
             cv2.rectangle(out, (x, y), (x + w, y + h), col, 1 if why else 2)
-            tag = why if why else ("1st" if rank.get(id(cnt)) == 0 else
-                                   "2nd" if rank.get(id(cnt)) == 1 else "")
-            if tag:
-                cv2.putText(out, tag, (x, max(9, y - 2)),
+            if why:
+                cv2.putText(out, why, (x, max(9, y - 2)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.35, col, 1)
 
     # sample markers, always
@@ -452,9 +446,7 @@ async function refresh(){
   tbl($('stats'),['class','n','mean L a b','min','max'],
     r.classes.map(c=>[c.name,c.n,c.mean||'--',c.min||'--',c.max||'--']));
   $('space').textContent=r.det.ok?('- classifying in '+r.det.space+
-    ', min area '+r.det.min_area+
-    ' | sent: 1st '+(r.det.primary?r.det.primary.colour:'none')+
-    ', 2nd '+(r.det.secondary?r.det.secondary.colour:'none')):'- no frame yet';
+    ', min area '+r.det.min_area):'- no frame yet';
   tbl($('det'),['colour','area','verdict'],
     (r.det.blobs||[]).map(b=>[b.colour,b.area,
       b.verdict==='ACCEPTED'?'<span class=ok>ACCEPTED</span>':
