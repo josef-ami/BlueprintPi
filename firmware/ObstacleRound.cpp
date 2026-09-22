@@ -889,6 +889,73 @@ float latReach(float s, float psi0) {
   return R * (cosf(psi0) - cosf(phi)) + (s - aArc) * tanf(phi);
 }
 
+// ============================================================
+// LOST PILLAR - search, then commit   (ported from WRO2025_FE_ANTi)
+// ============================================================
+//
+// ANTi's obstacle loop has no pillar tracks and no odometry frame; it follows
+// whatever the camera can see right now. So when a pillar leaves the frame it
+// has a two-stage answer (src/obstacle.py, states lost_color and pass_color):
+//
+//   lost_color   bias the heading 15 deg TOWARDS the side the pillar was last
+//                on, to bring it back into frame
+//   pass_color   after a few more blind frames, give up on re-acquiring and
+//                commit 35 deg the OTHER way - the side the rule says to pass
+//                on - until the car is round it
+//
+// This firmware normally does better than that: a confirmed track keeps its
+// lane position from odometry long after the camera has lost it, so losing
+// sight of a pillar changes nothing. But all of that lives in the LANE frame,
+// and when no wall can be fitted - a corner, the end of the inner wall, a
+// scan that came back mostly empty - laneOffset() fails and the planner had
+// nothing left to say. It set latYawCmd to zero and drove straight at
+// whatever it had just been avoiding.
+//
+// That blind case is exactly the situation ANTi's chain is written for: it
+// needs no lane frame, no odometry and no map, only which side the pillar was
+// last seen on. So it runs there, and only there. The chain clears the moment
+// the camera names a pillar again, or after LOST_ABANDON_FRAMES, because in
+// this architecture a commit that outlives its pillar is worse than nothing.
+//
+// Frames are counted per NEW Pi frame, as ANTi counts them per camera frame.
+
+       uint8_t LOST_SEARCH_FRAMES  = 2;     // blind frames before searching
+       uint8_t LOST_COMMIT_FRAMES  = 6;     // ... and before committing
+       uint8_t LOST_ABANDON_FRAMES = 40;    // ... and before forgetting it
+       float   LOST_SEARCH_DEG     = 15.0;  // toward where it was last seen
+       float   LOST_COMMIT_DEG     = 35.0;  // away, on the passing side
+
+enum LostPhase { LOST_NONE, LOST_SEARCH, LOST_COMMIT };
+
+int     lostPhase  = LOST_NONE;
+int     lostColor  = VIS_NONE;               // colour last believed; sets the side
+uint8_t lostFrames = 0;
+
+void clearLost() { lostPhase = LOST_NONE; lostColor = VIS_NONE; lostFrames = 0; }
+
+// Called once per new Pi frame, before the lane planner runs.
+void updateLost() {
+  if (visColor != VIS_NONE) {                // in sight: nothing to search for
+    lostColor = visColor; lostFrames = 0; lostPhase = LOST_NONE;
+    return;
+  }
+  if (lostColor == VIS_NONE) return;         // never saw one
+  if (lostFrames < 255) lostFrames++;
+  if (lostFrames > LOST_ABANDON_FRAMES)      clearLost();
+  else if (lostFrames > LOST_COMMIT_FRAMES)  lostPhase = LOST_COMMIT;
+  else if (lostFrames > LOST_SEARCH_FRAMES)  lostPhase = LOST_SEARCH;
+}
+
+// Extra yaw, degrees, + = LEFT. Zero unless the chain is running.
+float lostYaw() {
+  if (lostPhase == LOST_NONE || lostColor == VIS_NONE) return 0.0f;
+  // red is passed on its right, so the car goes RIGHT of it: commit is a right
+  // yaw and the search that precedes it is a left one. Green mirrors.
+  float side = (lostColor == VIS_RED) ? 1.0f : -1.0f;
+  return (lostPhase == LOST_SEARCH) ? side * LOST_SEARCH_DEG
+                                    : -side * LOST_COMMIT_DEG;
+}
+
 void updatePlanner() {
   // lane distance: encoder projected onto the lane direction
   long enc = readEncoder();
@@ -897,8 +964,9 @@ void updatePlanner() {
   laneAlongMm += dmm * cosf(wrapDeg(gHeading - laneHeading) * DEG_TO_RAD);
 
   if (!lidarNewFrame) return;
+  updateLost();
   laneOffOk = laneOffset(laneOffMm);
-  if (!plannerEnabled) { latYawCmd = 0.0f; passActive = false; return; }
+  if (!plannerEnabled) { latYawCmd = 0.0f; passActive = false; clearLost(); return; }
   addSighting();
   trackSecondary();
 
@@ -1057,7 +1125,15 @@ void updatePlanner() {
   }
   latTarget = constrain(target, -LANE_LIMIT_MM, LANE_LIMIT_MM);
 
-  if (!laneOffOk) { latYawCmd = 0.0f; return; }          // no walls: just hold heading
+  // No wall fit: the lane frame is gone and everything above it with it. The
+  // ANTi chain is the only thing that still has an opinion here - it is built
+  // for exactly this - so it steers, capped at the same authority a pass gets.
+  // With nothing lost either, this is the old behaviour: hold heading.
+  if (!laneOffOk) {
+    latYawCmd = constrain(lostYaw(), -PASS_YAW_MAX, PASS_YAW_MAX);
+    passActive = (lostPhase != LOST_NONE);
+    return;
+  }
   // Centring authority is deliberately gentle (CENTRE_YAW_MAX) so the car does
   // not weave down a straight. Right after a corner that is the wrong trade:
   // the car has a whole lane width to recover and only a few hundred mm to do
@@ -2076,6 +2152,11 @@ const ParamDesc PARAMS[] = {
   PF(TRACK_MATCH_MM,        G_PASS,   50,   600),
   PC(TRACK_CONFIRM,         G_PASS,    1,    20),
   PF(TRACK_FORGET_MM,       G_PASS,   50,  1500),
+  PC(LOST_SEARCH_FRAMES,    G_PASS,    0,   100),
+  PC(LOST_COMMIT_FRAMES,    G_PASS,    1,   150),
+  PC(LOST_ABANDON_FRAMES,   G_PASS,    2,   250),
+  PF(LOST_SEARCH_DEG,       G_PASS,    0,    60),
+  PF(LOST_COMMIT_DEG,       G_PASS,    0,    80),
 
   // ---- wall levelling ----
   PF(LEVEL_GAIN,            G_LEVEL,   0,     1),
