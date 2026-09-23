@@ -52,9 +52,9 @@ Wire frame - one ASCII line per send, SEND_HZ times a second, 18 fields:
                     camera bearing + LiDAR range on that ray; 32767 = none
   uX / uY           nearest LiDAR object in the corridor the camera has NOT
                     coloured (LazyGo edge detector); 32767 = none
-  sColor / sX / sY  second sign - the next accepted blob that is a different
-                    sign from the first. The firmware tracks it like the first,
-                    and uses its colour across a corner to pick the exit side.
+  sColor / sX / sY  always 2,32767,32767 - there is ONE sign per frame, the
+                    largest blob. The three fields stay so the frame layout
+                    (and older firmware) is unchanged.
 
 Commands on the same serial line:
     S            START            X            STOP
@@ -171,7 +171,6 @@ CAND_EDGE_MM = 150.0
 CAND_MIN_WIDTH_MM = 25.0
 CAND_MAX_WIDTH_MM = 120.0
 CAND_FOV_DEG = 90
-SECOND_MIN_SEP_DEG = 4.0
 SEND_HZ = 50
 CMD_REPEAT = 3
 BEARING_TOL_DEG = 2
@@ -211,15 +210,13 @@ sync_globals()
 lock = threading.Lock()
 vision = {"color": COL_NONE, "err": 0, "area": 0, "seq": 0, "t": 0.0,
           "box": None, "bearing": None,          # box in 640x480 px, for the overlay
-          "s_color": COL_NONE, "s_area": 0, "s_box": None, "s_bearing": None,
           "mode": "starting", "infer_ms": 0.0, "fps": 0.0, "yolo_error": None}
 latest_frame = None                              # RGB, only kept while someone watches
 viewers = 0
 
 link = {"line": "", "t": 0.0, "live": False, "serial_ok": False,
         "f": None, "l": None, "r": None, "cl": None, "cr": None,
-        "yaw": None, "pxy": None, "uxy": None, "sxy": None,
-        "s_name": "none", "hz": 0.0}
+        "yaw": None, "pxy": None, "uxy": None, "hz": 0.0}
 stm_log = collections.deque(maxlen=LOG_LINES)
 stm_state = {"state": "waiting for STM32", "corner": "", "exit": "", "lane": ""}
 commands = queue.Queue()                          # written to serial by the main loop only
@@ -430,10 +427,8 @@ def lazygo_mask(m, pf, top, bot):
 def find_pillars(hsv, lab, pf):
     """(accepted, candidates, floor).
 
-    accepted = every blob that passed, as (cnt, area, code), NEAREST FIRST
-    (tallest box when rank_by_height is on, else largest area). The firmware
-    wants two of them: the nearest sign to steer around, and the next one back,
-    which approaching a corner is usually the next straight's first sign.
+    accepted = every blob that passed, as (cnt, area, code), LARGEST AREA
+    FIRST. Only the first one goes to the firmware.
 
     candidates = [(cnt, area, code, reject_or_None)] for the debug overlay."""
     floor = floor_mask(hsv, lab, pf)
@@ -451,10 +446,7 @@ def find_pillars(hsv, lab, pf):
             cands.append((c, a, CODE[name], why))
             if why is None:
                 accepted.append((c, a, CODE[name]))
-    if pf["rank_by_height"]:
-        accepted.sort(key=lambda t: (-cv2.boundingRect(t[0])[3], -t[1]))
-    else:
-        accepted.sort(key=lambda t: -t[1])
+    accepted.sort(key=lambda t: -t[1])
     return accepted, cands, floor
 
 
@@ -537,18 +529,8 @@ class VisionThread(threading.Thread):
                 seq = (seq + 1) & 0xFFFFFFFF
                 if not hits:
                     color, err, area, box, bearing = COL_NONE, 0, 0, None, None
-                else:
+                else:                                     # the largest blob, only
                     color, err, area, box, bearing = describe(hits[0])
-                # second sign: the next accepted blob that is not the first
-                # one split in two (same colour, bearing within SECOND_MIN_SEP_DEG)
-                s_color, s_area, s_box, s_bearing = COL_NONE, 0, None, None
-                for hit in hits[1:]:
-                    c2, _, a2, b2, br2 = describe(hit)
-                    if (c2 == color and bearing is not None and br2 is not None
-                            and abs(br2 - bearing) < SECOND_MIN_SEP_DEG):
-                        continue
-                    s_color, s_area, s_box, s_bearing = c2, a2, b2, br2
-                    break
 
                 now = time.monotonic()
                 dt, t_prev = now - t_prev, now
@@ -557,8 +539,7 @@ class VisionThread(threading.Thread):
                 with lock:
                     vision.update(color=color, err=err, area=int(area),
                                   seq=seq, t=now, box=box, bearing=bearing,
-                                  s_color=s_color, s_area=s_area, s_box=s_box,
-                                  s_bearing=s_bearing, mode=mode, fps=fps,
+                                  mode=mode, fps=fps,
                                   infer_ms=self.yolo.infer_ms if mode.startswith("YOLO") else 0.0,
                                   yolo_error=self.yolo_error)
                     if viewers > 0:
@@ -576,7 +557,7 @@ class VisionThread(threading.Thread):
             print("[vision] stopped")
 
     def _find(self, frame, pf, sx, sy):
-        """(hits, cands, floor, mode). hits nearest first; cands = every box for
+        """(hits, cands, floor, mode). hits largest first; cands = every box for
         the overlay as (box, colour, reject_code_or_None)."""
         det = self._detector()
         if det is not None:
@@ -599,10 +580,7 @@ class VisionThread(threading.Thread):
                         # box area in 320x240 px, the unit AREA_K and the
                         # locate_pillar() sanity window were written for
                         hits.append((code, d.w * d.h / (sx * sy), box, d.conf))
-                if pf["rank_by_height"]:                     # nearest = tallest
-                    hits.sort(key=lambda t: (-(t[2][3] - t[2][1]), -t[1]))
-                else:
-                    hits.sort(key=lambda t: -t[1])
+                hits.sort(key=lambda t: -t[1])              # largest blob first
                 return hits, cands, None, f"YOLO {det.backend}"
 
         small = cv2.resize(frame, PROC_SIZE, interpolation=cv2.INTER_AREA)
@@ -623,7 +601,6 @@ def vision_now(now):
         v = dict(vision)
     if now - v["t"] > VISION_STALE_S:
         v["color"], v["err"], v["area"], v["bearing"] = COL_NONE, 0, 0, None
-        v["s_color"], v["s_area"], v["s_bearing"] = COL_NONE, 0, None
     return v
 
 
@@ -848,7 +825,7 @@ def lidar_candidates(ranges, left_line, right_line):
 
 def unclassified(cands, classified, match_mm=200.0):
     """Nearest candidate that is NOT a sign the camera already named.
-    classified = the located first and second signs (either may be None)."""
+    classified = the located signs (entries may be None)."""
     known = [p for p in classified if p is not None]
     for c in cands:
         if all(math.hypot(c[0] - k[0], c[1] - k[1]) > match_mm for k in known):
@@ -1079,8 +1056,6 @@ async function tick(){
    `L ${f(r.left)} &nbsp;F ${f(r.front)} &nbsp;R ${f(r.right)} mm<br>`+
    `cone L ${f(r.cone_left)} &nbsp;R ${f(r.cone_right)} mm &nbsp;yaw ${r.wall_yaw===null?'--':r.wall_yaw+'°'}<br>`+
    `pillar <b>${r.name}</b> err ${r.error} area ${r.area}`+
-   (r.second&&r.second!=='none'?` &nbsp;<span class=dim>2nd</span> <b>${r.second}</b>`+
-     (r.second_xy?` at ${r.second_xy[0]},${r.second_xy[1]}`:''):'')+
    (r.pillar_xy?` &nbsp;at ${r.pillar_xy[0]} fwd, ${r.pillar_xy[1]} left mm`:'')+
    (r.unknown_xy?`<br>lidar object (colour unknown) ${r.unknown_xy[0]} fwd, ${r.unknown_xy[1]} left mm`:'');
   const lg=$('log'), atBottom=lg.scrollTop+lg.clientHeight>=lg.scrollHeight-5;
@@ -1093,7 +1068,6 @@ async function tick(){
       ['camera loop',r.vis_fps+' fps'],['colour',r.name],['err',r.error+' px'],['area',r.area],
       ['frame seq',r.vseq],
       ['pillar x,y',r.pillar_xy?r.pillar_xy.join(', ')+' mm':'--'],
-      ['2nd pillar',r.second+(r.second_xy?' at '+r.second_xy.join(', ')+' mm':'')],
       ['unknown x,y',r.unknown_xy?r.unknown_xy.join(', ')+' mm':'--']]);
     rows($('telLink'),[['lidar',r.lidar_live?'live':'STALE'],['serial',r.serial_ok?'open':'closed'],
       ['frame rate',r.hz.toFixed(1)+' Hz'],['front/left/right',
@@ -1133,9 +1107,6 @@ def status():
                      [round(link["pxy"][0]), round(link["pxy"][1])],
         "unknown_xy": None if link.get("uxy") is None else
                       [round(link["uxy"][0]), round(link["uxy"][1])],
-        "second": link.get("s_name", "none"),
-        "second_xy": None if link.get("sxy") is None else
-                     [round(link["sxy"][0]), round(link["sxy"][1])],
         "lidar_live": link["live"], "serial_ok": link["serial_ok"], "hz": link["hz"],
         "last_line": link["line"].strip(),
         "stm32_state": stm_state["state"], "corner": stm_state["corner"],
@@ -1384,20 +1355,16 @@ def main():
                 pxy = (locate_pillar(lidar._ranges, v["bearing"], v["area"])
                        if v["color"] != COL_NONE else None)
                 pX, pY = _pxy(pxy)
-                sxy = (locate_pillar(lidar._ranges, v["s_bearing"], v["s_area"])
-                       if v["s_color"] != COL_NONE else None)
-                sX, sY = _pxy(sxy)
-                uxy = unclassified(cands, (pxy, sxy))
+                uxy = unclassified(cands, (pxy,))
                 uX, uY = _pxy(uxy)
                 line = (f"{_u16(l)},{_u16(f)},{_u16(r)},{lidar.rev},"
                         f"{v['color']},{v['err']},{v['area']},{v['seq']},"
                         f"{_cone_u16(cl)},{_cone_u16(cr)},{_ang(yaw)},{pX},{pY},{uX},{uY},"
-                        f"{v['s_color']},{sX},{sY}\n")
+                        f"{COL_NONE},{PXY_NONE},{PXY_NONE}\n")        # no second sign
                 if write(line.encode("ascii")):
                     frames += 1
                 link.update(line=line, t=now, f=f, l=l, r=r, cl=cl, cr=cr,
-                            yaw=yaw, pxy=pxy, uxy=uxy, sxy=sxy,
-                            s_name=NAMES[v["s_color"]])
+                            yaw=yaw, pxy=pxy, uxy=uxy)
             if live != was_live:
                 note("[obstacle] lidar LIVE - streaming" if live else
                      "[obstacle] lidar STALE - silent")

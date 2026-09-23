@@ -111,8 +111,6 @@ PI_SPECS = [
          "bearing from the calibrated fisheye K/D (off = equidistant HFOV_DEG). "
          "Your K says +/-48 deg; hfov_deg says +/-80. Measure before trusting either"),
     Spec("SWAP_RB", True, 0, 1, "camera", "b", "swap red and blue channels"),
-    Spec("SECOND_MIN_SEP_DEG", 4.0, 0, 30, "camera", "f",
-         "a second blob of the same colour closer than this in bearing is the first sign split in two"),
     Spec("USE_LAB", True, 0, 1, "lab", "b",
          "classify pillars in CIE Lab instead of HSV. Lab separates red from green on "
          "the a channel without needing saturation, so a matte pillar under dim light "
@@ -187,8 +185,6 @@ PI_SPECS = [
          "Gaussian blur on the colour mask then threshold 127 (0 = off)"),
     Spec("min_box_h_px", 20, 0, 200, "filter", "i",
          "a sign's box must be at least this tall, 640x480 units (LazyGo 30; reject H)"),
-    Spec("rank_by_height", True, 0, 1, "filter", "b",
-         "nearest sign = tallest box (LazyGo); off = largest area"),
 
     # ---- cone wall fit ----
     Spec("CONE_DEG", 45, 10, 120, "cone", "i", "width of each side cone"),
@@ -320,7 +316,7 @@ class PiParams:
                                   "floor_below_min", "aspect_min", "solidity_min",
                                   "contrast_s_min", "bottom_margin_px",
                                   "roi_top_px", "roi_bottom_px", "mask_blur_px",
-                                  "min_box_h_px", "rank_by_height")}
+                                  "min_box_h_px")}
 
 
 # --------------------------------------------------------------------------
@@ -509,6 +505,31 @@ def calibrated():
     return os.path.exists(CAL_PATH)
 
 
+# Firmware defaults that CHANGED (name -> the old default). tuning.json keeps
+# every STM32 value the page has ever seen, so without this a new firmware
+# default would be overwritten by the old one on the first push. A saved value
+# still equal to the old default is dropped (the firmware's new default wins);
+# anything you tuned to another value is kept.
+STM_OLD_DEFAULTS = {
+    # firmware v9 (param table v8)
+    "PASS_MARGIN_MM": 80.0,        # -> 150: more air to a sign
+    "PASS_HOLD_MM": 250.0,         # -> 30
+    "BACKOFF_MAX_MM": 250.0,       # -> 300
+    "BACKOFF_MARGIN_MM": 60.0,     # -> 30, now a simulated clearance
+}
+
+
+def _drop_old_defaults(saved_stm):
+    out, dropped = {}, []
+    for k, v in saved_stm.items():
+        old = STM_OLD_DEFAULTS.get(k)
+        if old is not None and abs(float(v) - old) < 1e-6:
+            dropped.append(k)
+            continue
+        out[k] = float(v)
+    return out, dropped
+
+
 def load(pi: PiParams, stm: StmParams, path=TUNING_PATH, cal_path=CAL_PATH):
     """tuning.json first, then vision_cal.json on top (calibration always wins).
     An older tuning.json that holds a real Lab fit (USE_LAB on) is honoured until
@@ -525,8 +546,11 @@ def load(pi: PiParams, stm: StmParams, path=TUNING_PATH, cal_path=CAL_PATH):
             # (and its USE_LAB = off). AREA_K is kept; it is measured separately.
             vals = {k: v for k, v in vals.items() if k not in CAL_KEYS or k == "AREA_K"}
         n_pi = len(pi.set_many(vals))
-        stm.desired.update({k: float(v) for k, v in saved.get("stm32", {}).items()})
-        notes.append(f"tuning: {n_pi} Pi, {len(saved.get('stm32', {}))} STM32")
+        stm_vals, dropped = _drop_old_defaults(saved.get("stm32", {}))
+        stm.desired.update(stm_vals)
+        notes.append(f"tuning: {n_pi} Pi, {len(stm_vals)} STM32")
+        if dropped:
+            notes.append("new firmware defaults for " + ", ".join(sorted(dropped)))
     cal, err = _read(cal_path)
     if cal is None:
         notes.append("NO vision_cal.json - Lab ranges are the rulebook defaults, "

@@ -10,7 +10,28 @@
 #endif
 
 // ============================================================
-// OBSTACLE ROUND - NON-BLOCKING FIRMWARE  (v7, param table v6)
+// OBSTACLE ROUND - NON-BLOCKING FIRMWARE  (v9, param table v8)
+//
+// v9 vs v7
+//   - one sign per frame (the largest blob); fields 15-17 are parsed past
+//   - corner trigger: the side beam alone (no cone test); before the direction
+//     is known the side with the LONGER beam is the candidate; an odometry
+//     window (path since the last corner trigger) gates it:
+//       < CORNER_MIN_RUN_MM (2000)       never a corner
+//       > CORNER_FALLBACK_RUN_MM (2700)  relaxed evidence (1 rev, no wall history)
+//   - more air to a sign (PASS_MARGIN_MM 150) and a yaw cap while alongside
+//     one (ALONGSIDE_YAW_MAX), so the swept body corner cannot clip it
+//   - reach check rebuilt: a forward simulation of the real steering loop,
+//     judged against the car's swept outline, decided once per LiDAR rev in a
+//     distance window, confirmed over REACH_CONFIRM revs (stopped); a BACKOFF
+//     reverses a PLANNED distance in one go (see "REACH" below), never with
+//     the rear corner at a wall
+//   - tight pairs (opposite sides, < PAIR_TIGHT_MM apart) pass with
+//     PASS_MARGIN_TIGHT_MM on their rule lines; PASS_HOLD_MM 250 -> 30
+//   - a PLAN_REVERSE corner approaches on the inner half (TURN_REV_INNER_MM):
+//     the reverse arc swings the car toward the old lane's outer wall
+//   All of it was run against a host simulation of the field (the real .ino
+//   compiled for the PC, 100 random sign layouts x 2 seat patterns).
 //
 // The STM32 owns all driving. The Pi (obstacleRound.py) is a sensor pipe:
 // LiDAR + camera in, one CSV line out at up to 50 Hz, plus START/STOP and
@@ -28,8 +49,8 @@
 //   11-12 pX,pY              first sign centre, mm, x fwd / y left, 32767 = none
 //   13-14 uX,uY              nearest uncoloured LiDAR object - parsed past, NOT used
 //                            (steering toward it pulled the car into other lanes)
-//   15    sColor             second sign colour (2 = none)
-//   16-17 sX,sY              second sign centre
+//   15-17 sColor,sX,sY       second sign - parsed past, NOT used (v9: the Pi
+//                            sends 2,32767,32767; one sign, the largest blob)
 // A shorter line still parses: 4 fields = open-round feed (no camera).
 //
 // COMMANDS  S = START (armed or finished only), X = STOP (any state).
@@ -44,8 +65,10 @@
 //      SIDE_OPEN_MM (1500) on SIDE_OPEN_REVS new revolutions, after that side
 //      has shown a wall on SIDE_WALL_REVS revolutions this straight, with the
 //      car within TURN_TRIGGER_MAX_YAW of the lane. Until the direction is
-//      known BOTH sides are watched: the outer wall never ends, so the first
-//      side to open is the inner side - right = clockwise, left = anticlockwise.
+//      known the side with the longer beam is the candidate: the outer wall
+//      never ends, so the side that opens is the inner side - right =
+//      clockwise, left = anticlockwise. After the first corner, odometry
+//      gates it (CORNER_MIN_RUN_MM / CORNER_FALLBACK_RUN_MM).
 //      The floor colour sensor only drives LED2/LED3 now.
 //   3. TURNING, shaped by the LAST SIGN of the straight:
 //        passed on the OUTER side (CW green / CCW red):
@@ -58,9 +81,9 @@
 //      then stop TURN_VIEW_MS so the camera sees the next straight, and drive.
 //      Optional TURN_NEXT_OVERRIDE: a forward-arc corner whose NEXT straight
 //      starts with a sign needing the inner side arcs early instead.
-//   4. A sign whose correct side cannot be reached any more makes the car
-//      reverse in a straight line (BACKOFF) until the pass is reachable,
-//      up to BACKOFF_MAX_MM, then it commits to the correct side.
+//   4. A sign whose correct side the reach simulation says cannot be reached
+//      makes the car reverse in a straight line (BACKOFF) by a planned
+//      distance, up to BACKOFF_MAX_MM per sign, then it commits.
 //
 // BENCH-VERIFIED
 //   motor    PA2 forward, PA3 reverse
@@ -132,6 +155,14 @@ const int   SERVO_MAX_PULSE_US  = 2500;
 // Obstacle round: one constant PWM for driving, turning and reversing.
        int DRIVE_PWM = 60;
 
+// Heading PID (used by updateDriveSteer, and mirrored by the REACH simulation)
+       float HEAD_KP        = 2.0;
+       float YAW_FILT_ALPHA = 0.35;
+       float SERVO_SLEW     = 2.5;     // servo deg per IMU update (~100 Hz)
+       float INTEGRAL_CLAMP = 300.0;
+       float HEAD_KI        = 0.0;
+       float HEAD_KD        = 0.0;
+
 
 SPIClass SPI_IMU(PA7, PA6, PA5);  // MOSI, MISO, SCLK
 Servo steeringServo;
@@ -173,10 +204,9 @@ float    wallAngDeg   = 0.0;                     // + = car pointing left of the
 uint32_t lidarRev     = 0;
 bool     lidarNewRev  = false;                   // true only on the loop rev changed
 
-// Two signs per frame (struct Sighting is declared at the top of the file).
+// One sign per frame (struct Sighting is declared at the top of the file).
 const long PXY_NONE = 32767;
 Sighting sign1 = { false, VIS_NONE, 0, 0 };      // largest accepted blob
-Sighting sign2 = { false, VIS_NONE, 0, 0 };      // next one back (often the next straight's)
 int visColor = VIS_NONE;                         // sign1's colour, even when not located
 
 char    lidarBuf[128];               // an 18-field frame is 83 chars typical, 104 worst
@@ -230,10 +260,8 @@ void parseLine() {
   sign1.color = visColor;
   if (sign1.valid) { sign1.x = (float)f[11]; sign1.y = (float)f[12]; }
 
-  // fields 13-14 (uX, uY: uncoloured LiDAR object) are ignored - see the header
-
-  sign2.valid = (n >= 18 && (f[15] == VIS_RED || f[15] == VIS_GREEN) && xyOk(f[16], f[17]));
-  if (sign2.valid) { sign2.color = (int)f[15]; sign2.x = (float)f[16]; sign2.y = (float)f[17]; }
+  // fields 13-14 (uX, uY: uncoloured LiDAR object) and 15-17 (second sign)
+  // are ignored - see the header
 
   lidarLastMs   = millis();
   lidarStale    = false;
@@ -267,11 +295,19 @@ void serviceLidar() {
                                             //   where the inner side looks "open" across the old lane
        float    TURN_TRIGGER_MAX_YAW = 20.0; // only while the car is this close to the lane
                                             //   direction: mid-swerve the "side" beam isn't sideways
-       float    CORNER_LOCKOUT_MM = 700.0;  // no corner trigger this soon after a corner: the next
-                                            //   corner mouth is a full 1000 mm straight away
-       bool     SIDE_OPEN_NEED_CONE = true; // open also needs that side's 45 deg wall fit to be gone:
-                                            //   a single beam grazing past the island corner while the
-                                            //   car is still yawed out of a turn reads 2800 mm (sim)
+// Odometry window (v9), after the first corner only - the start position in
+// the first straight is unknown. Measured on the encoder since the last turn
+// FINISHED (signed: a BACKOFF / RECOVER reverse counts back) - the length of
+// this straight so far. In the host simulation of the full lap the real
+// corners trigger at 1500-2100 mm of that (reverse-arc corners end farther
+// back than forward-arc ones); a false "open" seen right after a turn came
+// at ~800-900 mm.
+//   < CORNER_MIN_RUN_MM       no corner, whatever the beam says
+//   MIN .. FALLBACK           normal evidence (SIDE_WALL_REVS + SIDE_OPEN_REVS)
+//   > CORNER_FALLBACK_RUN_MM  overdue: 1 open revolution is enough, no wall
+//                             history needed - a safety net, not the main rule
+       float    CORNER_MIN_RUN_MM      = 1200.0;
+       float    CORNER_FALLBACK_RUN_MM = 2300.0;
 
 // ---- wall recovery ----
        uint16_t WALL_PANIC_MM     = 200;
@@ -369,8 +405,8 @@ void setServoAngle(float angleDeg) {
   steeringServo.writeMicroseconds(pulse);
 }
 
-// TIM5 encoder, negated so driving forward counts up
-void zeroEncoder() { TIM5->CNT = 0; }
+// TIM5 encoder, negated so driving forward counts up (zeroEncoder() is with
+// the corner odometer, below the planner constants)
 long readEncoder() { return -(int32_t)TIM5->CNT; }
 long absEnc(long v) { return v < 0 ? -v : v; }
 
@@ -462,9 +498,18 @@ BlockColor classifyColor() {
 // before the sign, which the IMU heading PID tracks.
        float    CORRIDOR_MM       = 1000.0;
        float    CAR_HALF_W_MM     = 57.0;
+       float    CAR_HALF_LEN_MM   = 85.0;    // v9: LiDAR to the far end of the body (measure it!).
+                                             //   A car yawed psi sweeps a band
+                                             //   W cos(psi) + L sin(psi) wide each side, not W:
+                                             //   at 40 deg that is 98 mm, not 57
        float    PILLAR_HALF_MM    = 25.0;
-       float    PASS_MARGIN_MM    = 80.0;    // air gap car side <-> sign face
-      float    PASS_CLEAR_MM     = 162.0;   // derived, see recomputeDerived()
+       float    PASS_MARGIN_MM    = 150.0;   // air gap car side <-> sign face; v9: was 80 (clipped)
+       float    PASS_MARGIN_TIGHT_MM = 70.0; // v9: ... for a TIGHT PAIR: two consecutive signs passed on
+       float    PAIR_TIGHT_MM     = 1000.0;  //   opposite sides less than this apart along the lane. The
+                                             //   car has to cross the lane between them, and 2 x 150 mm
+                                             //   of extra swing does not fit in 600 mm (host sim: wrong
+                                             //   side). Both get the tight margin and hug their lines.
+      float    PASS_CLEAR_MM     = 232.0;   // derived, see recomputeDerived()
        float    WALL_MARGIN_MM    = 45.0;
       float    LANE_LIMIT_MM     = 398.0;   // derived, see recomputeDerived()
        float    GAP_CENTRE_W      = 1.0;     // 1 = middle of the sign-to-wall gap, 0 = hug the sign
@@ -478,10 +523,9 @@ BlockColor classifyColor() {
        float    CENTRE_YAW_MAX    = 20.0;    // deg, plain centring
        float    PASS_YAW_MAX      = 40.0;    // deg, while a sign is in play; v7: was 75 - with
                                              //   HEAD_KP 2 anything over ~28 deg is full lock anyway
-       float    TURN_RADIUS_MM    = 270.0;   // full-lock radius (worse side) for the reach estimate
-       float    REACH_LEAD_MM     = 60.0;    // reach is judged to this far before the sign
-       float    REACH_NEED_MIN_MM = 60.0;    // a lateral move smaller than this is always reachable
-       float    REACH_MARGIN_MM   = 30.0;    // unreachable = need > reach + this
+       float    ALONGSIDE_YAW_MAX = 15.0;    // v9: deg, while any sign in play is beside the body:
+                                             //   the swept corner stays within ~20 mm of W
+       float    TURN_RADIUS_MM    = 270.0;   // full-lock radius (worse side) for the reach simulation
        float    PLAN_MAX_AHEAD_MM = 1600.0;  // ignore sightings farther ahead
        float    SIGHT_MIN_ALONG_MM = -50.0;  // ... or farther behind
        float    SIGHT_MAX_YAW     = 30.0;    // deg: car turned further than this off the lane ->
@@ -491,7 +535,11 @@ BlockColor classifyColor() {
        float    PILLAR_MAX_LAT_MM = 330.0;   // seats are at +/-100; beyond this = another straight's sign
                                              //   v7: was 420, let other lanes' signs in after a corner
        float    CROSS_MAX_LAT_MM  = 1300.0;  // beyond this it is not even the next straight
-       float    PASS_HOLD_MM      = 250.0;   // keep a sign's side until it is this far behind the car
+       float    PASS_HOLD_MM      = 30.0;    // keep a sign's side until it is this far behind the LiDAR;
+                                             //   v9: was 250. Once the sign is behind the LiDAR,
+                                             //   turning toward it swings the body part beside it
+                                             //   AWAY, and the next sign needs every mm of run-up
+                                             //   (host sim: 250 -> late swing -> next sign hit)
        float    TRACK_MATCH_MM    = 200.0;   // same sign if within this (along and lateral)
        float    TRACK_GAIN        = 0.5;     // how far a new sighting moves a track estimate
        uint8_t  TRACK_CONFIRM     = 2;       // sightings before a sign steers the car
@@ -499,26 +547,77 @@ BlockColor classifyColor() {
        uint16_t LANE_VALID_MAX_MM = 1100;    // cone farther than this = no wall on that side
       float    TICKS_PER_MM      = 1.4853;  // derived, see recomputeDerived()
 
+// ---- REACH: can the car still get to the sign's correct side? (v9) ----
+// v7 compared an ideal "full lock, then straight" arc against the distance
+// left, every frame, against the comfort target. It was wrong both ways:
+// the real loop (HEAD_KP, SERVO_SLEW, the aim law) turns much later than
+// full lock, so it said "reachable" and the car arrived still yawed and
+// clipped the sign; one noisy frame said "unreachable" and the car reversed
+// for nothing. Now:
+//   1. SIMULATE the real loop: 10 mm steps of the same aim law, the same
+//      yaw caps, the same PID and slew (at the measured speed, never below
+//      REACH_SPEED_MMPS) and the servo -> curvature of TURN_RADIUS_MM.
+//   2. JUDGE the swept outline, not the centre: over the whole stretch where
+//      the body overlaps the sign along the lane, the side of the car toward
+//      the sign (W cos psi + L sin psi) must stay REACH_SAFETY_MM outside the
+//      sign's face. Result: the smallest clearance, mm (< 0 = contact).
+//   3. DECIDE rarely and only where the answer is good: once per new LiDAR
+//      revolution, only for the nearest sign, only while it is between
+//      REACH_DECIDE_NEAR_MM and REACH_DECIDE_FAR_MM ahead, only once it has
+//      REACH_MIN_HITS sightings. Nearer than NEAR the car never reverses.
+//   4. CONFIRM: REACH_CONFIRM revolutions in a row must fail before acting.
+//      On the first failing one the car STOPS (REACH_PAUSE_MS at most) and
+//      confirms standing still, so it is not swerving deeper while it decides.
+//      The sign before this one (being passed, or passed and remembered) is
+//      part of the simulation: the car is held on its line until it is
+//      PASS_HOLD behind - that is what makes a tight pair hard.
+//   5. ACT, cheapest first: the gap-centre target fails but the rule line
+//      (the bound, PASS_MARGIN from the sign) passes -> aim at the bound for
+//      this sign ("hug"). Both fail -> BACKOFF by a PLANNED distance: the
+//      shortest reverse after which the simulation clears by
+//      BACKOFF_MARGIN_MM, reversed in one go (no re-checking every frame).
+//      Budget spent (BACKOFF_MAX_MM per sign) -> hug and commit.
+// Every decision is logged as a "# REACH" line.
+       float    REACH_SAFETY_MM      = 20.0;   // extra air the simulated outline must keep
+       float    REACH_DECIDE_NEAR_MM = 300.0;  // closer than this: never reverse, commit
+       float    REACH_DECIDE_FAR_MM  = 900.0;  // farther than this: the track is too rough to judge
+       uint8_t  REACH_MIN_HITS       = 3;      // sightings before a sign is judged
+       uint8_t  REACH_CONFIRM        = 3;      // failing revolutions in a row before acting
+       float    REACH_SPEED_MMPS     = 400.0;  // slowest speed the simulation assumes
+       unsigned long REACH_PAUSE_MS  = 700;    // on the FIRST failing revolution the car stops and
+                                               //   confirms standing still (host sim: while it kept
+                                               //   driving, the swerve toward the sign yawed it 20-30
+                                               //   deg before the verdict, and a yawed car at the
+                                               //   outer wall cannot back off); 0 = never stop
+
 // ---- reverse and re-plan (BACKOFF) ----
-// When the correct side of the nearest sign can no longer be reached, the car
-// reverses in a straight line: every mm reversed is a mm of extra run-up. It
-// drives again as soon as the pass is reachable with BACKOFF_MARGIN_MM to
-// spare. After BACKOFF_MAX_MM for one sign it commits to the correct side at
-// full authority - touching a sign is allowed while it stays in its circle
-// (rule 9.20); a wrong-side pass ends the round (9.24.5). Reversing is BLIND
-// (nothing measures behind the car yet), so keep BACKOFF_MAX_MM short.
+// Reverses in a straight line along the lane (every mm is a mm of run-up) by
+// the distance the REACH plan asked for, then drives again. Reversing is
+// BLIND (nothing measures behind the car yet), so keep BACKOFF_MAX_MM short.
+// Touching a sign is allowed while it stays in its circle (rule 9.20); a
+// wrong-side pass ends the round (9.24.5) - that is why a spent budget still
+// commits to the correct side.
        bool     BACKOFF_ENABLE    = true;
        int      BACKOFF_PWM       = 50;
-       float    BACKOFF_MAX_MM    = 250.0;   // per sign
-       float    BACKOFF_MARGIN_MM = 60.0;    // reach must beat need by this to drive again
+       float    BACKOFF_MAX_MM    = 300.0;   // per sign; v9: was 250
+       float    BACKOFF_MARGIN_MM = 30.0;    // v9: the planned reverse must make the simulated
+                                             //   clearance at least this (was: reach - need)
        float    BACKOFF_MIN_MM    = 80.0;    // reverse at least this far each time (no 20 mm dithering)
        float    BACKOFF_BEHIND_MM = 200.0;   // may reverse this far behind where the straight
                                              //   began: after a forward-arc corner the car exits on the
                                              //   outer side with ~300 mm of corner square behind it, and
                                              //   a sign right at the exit needs that run-up (blind!)
+       unsigned long BACKOFF_TIMEOUT_MS = 3000; // v9: no encoder progress for this long = stuck, stop
+       float    BACKOFF_WALL_MM   = 10.0;    // v9: rear corner <-> wall while reversing (host sim: a
+                                             //   BACKOFF started yawed 20 deg at the outer limit backed
+                                             //   the rear corner into the wall)
 
-struct PillarTrack { bool used; int color; float lat; float along; uint8_t hits; float lastSeen; float backedMm; };
-const int   MAX_TRACKS = 4;
+struct PillarTrack { bool used; int color; float lat; float along; uint8_t hits; float lastSeen;
+                     float backedMm; bool hug; bool tight; bool passed; };
+const int   MAX_TRACKS = 6;
+const float TRACK_KEEP_BEHIND_MM = 600.0f;  // v9: a passed sign is remembered this far behind, so
+                                            //   a BACKOFF that reverses the car back beside it
+                                            //   finds its bound still there
 PillarTrack tracks[MAX_TRACKS];
 
 float laneOffMm   = 0.0;     // + = car left of lane centre
@@ -530,14 +629,42 @@ float latTarget   = 0.0;
 bool  passActive  = false;
 bool  plannerEnabled = false;  // DRIVE / FINAL / BACKOFF - sightings mid-turn are in the wrong lane frame
 
-int   backoffWanted = -1;      // track index whose correct side is unreachable, -1 = none
-bool  passFeasible  = true;    // nearest sign reachable with BACKOFF_MARGIN_MM to spare
-float reachNeedMm   = 0.0, reachHaveMm = 0.0;   // last reach check, for the log
+int     backoffWanted = -1;    // track index the REACH plan wants a BACKOFF for, -1 = none
+float   backoffPlanMm = 0.0;   // ... and how far
+int     reachTrack    = -1;    // track the failing-revolution count belongs to
+uint8_t reachBad      = 0;     // consecutive failing revolutions
+float   reachClearMm  = 0.0;   // last simulated clearance, for the log
+bool    reachPause    = false; // stopped while a failing REACH verdict is confirmed
+unsigned long reachPauseMs = 0;
+
+// ---- odometry (v9) ----
+float gSpeedMmps   = 0.0;      // measured forward speed, filtered (REACH simulation)
+long  odoLastEnc   = 0;
+unsigned long odoLastMs = 0;
+float odoSpeedAcc  = 0.0;
+bool  overdueLogged = false;   // "corner overdue" printed once per straight
+
+// once per loop, and before every encoder zero (the speed must not see the jump)
+void odoUpdate() {
+  long e = readEncoder();
+  float mm = (e - odoLastEnc) / TICKS_PER_MM;
+  odoLastEnc = e;
+  odoSpeedAcc  += mm;
+  unsigned long now = millis();
+  if (now - odoLastMs >= 50) {                               // 20 Hz speed estimate
+    float v = odoSpeedAcc * 1000.0f / (float)(now - odoLastMs);
+    gSpeedMmps += 0.5f * (v - gSpeedMmps);
+    odoSpeedAcc = 0.0f; odoLastMs = now;
+  }
+}
+
+void zeroEncoder() { odoUpdate(); TIM5->CNT = 0; odoLastEnc = 0; }
 
 // Rule 9.19 - the ONLY place the colour -> side rule is written.
 bool passRight(int color) { return color == VIS_RED; }
 
-void clearTracks() { for (int i = 0; i < MAX_TRACKS; i++) tracks[i].used = false; passActive = false; backoffWanted = -1; }
+void clearTracks() { for (int i = 0; i < MAX_TRACKS; i++) tracks[i].used = false; passActive = false;
+                     backoffWanted = -1; reachTrack = -1; reachBad = 0; }
 
 // ---- CROSS-CORNER SIGHTING ----
 // The camera sees the next straight's first sign across the corner. Its
@@ -638,21 +765,133 @@ void addSighting(const Sighting &s) {
   tracks[slot].used = true; tracks[slot].color = s.color;
   tracks[slot].lat = lat;   tracks[slot].along = at;
   tracks[slot].hits = 1;    tracks[slot].lastSeen = laneAlongMm; tracks[slot].backedMm = 0.0f;
+  tracks[slot].hug = false;  tracks[slot].tight = false; tracks[slot].passed = false;
 }
 
-// Most sideways travel the car can make in s mm of lane, starting at yaw
-// psi0 (rad, + = already angled TOWARD the target): arc at full lock up to
-// PASS_YAW_MAX, then straight at that angle.
-float latReach(float s, float psi0) {
-  if (s <= 0) return 0;
-  float R = TURN_RADIUS_MM, phi = PASS_YAW_MAX * DEG_TO_RAD;
-  psi0 = constrain(psi0, -phi, phi);
-  float aArc = R * (sinf(phi) - sinf(psi0));            // lane distance used by the arc
-  if (s <= aArc) {                                      // still on the arc when we get there
-    float sp = asinf(constrain(sinf(psi0) + s / R, -1.0f, 1.0f));
-    return R * (cosf(psi0) - cosf(sp));
+// ---- REACH simulation (v9) ----
+// Half-width of the band the body sweeps toward one side at yaw psi (rad).
+float sweptHalfW(float psi) { return CAR_HALF_W_MM * cosf(psi) + CAR_HALF_LEN_MM * fabsf(sinf(psi)); }
+
+// The aim distance the planner uses with a sign `togo` mm ahead (< 0 = passed).
+float passAimMm(float togo) {
+  return (togo > PASS_LEAD_MM) ? fmaxf(togo - PASS_LEAD_MM, PASS_AIM_MIN_MM) : HOLD_AIM_MM;
+}
+
+// Along-lane half-length of "the body is beside the sign".
+float alongsideMm() { return CAR_HALF_LEN_MM + PILLAR_HALF_MM; }
+
+// Drive the real steering loop forward, in the lane frame, toward lateral
+// target `tgt` for a sign `rel` mm ahead at lateral `plat`, passed on its
+// right if `pr`. Start: lateral y0 (mm, + left), yaw psi0Deg (+ left of the
+// lane), servo offset d0 (deg from straight, + = steering left), speed v.
+// Returns the smallest clearance (mm) between the swept outline and the
+// sign's face + REACH_SAFETY_MM while the body is beside it. < 0 = contact.
+const float REACH_SIM_STEP_MM = 10.0f;
+const float IMU_HZ            = 100.0f;    // SERVO_SLEW is per IMU update
+
+// holdS / holdTgt: for the first holdS mm the car is still bound to the sign
+// before this one (the planner aims at holdTgt until that sign is PASS_HOLD
+// behind), which is what makes a tight pair hard.
+float reachSim(float y0, float psi0Deg, float d0, float tgt, float rel, float plat, bool pr, float v,
+               float holdS, float holdTgt) {
+  const float ds   = REACH_SIM_STEP_MM;
+  const float slew = SERVO_SLEW * IMU_HZ * ds / fmaxf(v, REACH_SPEED_MMPS);
+  const float travL = SERVO_TRUE_STRAIGHT - SERVO_MAX_LEFT;     // + offsets
+  const float travR = SERVO_MAX_RIGHT - SERVO_TRUE_STRAIGHT;    // - offsets
+  const float win  = alongsideMm();
+  const float line = pr ? plat - PILLAR_HALF_MM - REACH_SAFETY_MM
+                        : plat + PILLAR_HALF_MM + REACH_SAFETY_MM;
+  float y = y0, psi = psi0Deg * DEG_TO_RAD, d = d0, worst = 1e9f;
+  for (float s = 0.0f; s <= rel + win; s += ds) {
+    float togo = rel - s;
+    float ymax = (fabsf(togo) <= win) ? fminf(ALONGSIDE_YAW_MAX, PASS_YAW_MAX) : PASS_YAW_MAX;
+    bool  held = s < holdS;
+    float aimT = held ? holdTgt : tgt;
+    float aimD = held ? passAimMm(holdS - PASS_HOLD_MM - s) : passAimMm(togo);
+    float cmd  = constrain(atan2f(aimT - y, aimD) / DEG_TO_RAD, -ymax, ymax);
+    float want = HEAD_KP * (cmd - psi / DEG_TO_RAD);            // servo deg, + = left
+    d += constrain(want - d, -slew, slew);
+    d  = constrain(d, -travR, travL);
+    float k = (d >= 0.0f ? d / travL : d / travR) / TURN_RADIUS_MM;   // 1/mm, + = left
+    psi += k * ds;
+    y   += ds * sinf(psi);
+    if (fabsf(togo) <= win) {
+      float m = pr ? line - (y + sweptHalfW(psi)) : (y - sweptHalfW(psi)) - line;
+      if (m < worst) worst = m;
+    }
   }
-  return R * (cosf(psi0) - cosf(phi)) + (s - aArc) * tanf(phi);
+  return worst;
+}
+
+// The two lateral targets for passing track t alone: the middle of the gap
+// between its face and the wall on its passing side (clamped to the rule
+// line), and the rule line itself (PASS_CLEAR from its centre).
+float passClear(const PillarTrack &t) {
+  return t.tight ? PILLAR_HALF_MM + CAR_HALF_W_MM + PASS_MARGIN_TIGHT_MM : PASS_CLEAR_MM;
+}
+
+void passTargets(const PillarTrack &t, float &gap, float &bound) {
+  bool pr = passRight(t.color);
+  bound = pr ? t.lat - passClear(t) : t.lat + passClear(t);
+  float mid = pr ? 0.5f * ((t.lat - PILLAR_HALF_MM) + wallLatRight())
+                 : 0.5f * ((t.lat + PILLAR_HALF_MM) + wallLatLeft());
+  gap = GAP_CENTRE_W * mid;
+  gap = pr ? fminf(gap, bound) : fmaxf(gap, bound);
+  if (t.tight) gap = bound;                     // a tight pair: no extra swing
+  gap   = constrain(gap,   -LANE_LIMIT_MM, LANE_LIMIT_MM);
+  bound = constrain(bound, -LANE_LIMIT_MM, LANE_LIMIT_MM);
+}
+
+// Clearance for track t from the car's state now, or after reversing
+// `back` mm straight along the lane (heading hold -> yaw and servo end ~0).
+// The confirmed sign just before t (in play, or passed and remembered) holds
+// the car on its line until it is PASS_HOLD behind.
+float reachFrom(const PillarTrack &t, float tgt, float back) {
+  float rel  = t.along - laneAlongMm + back;
+  int prev = -1;
+  for (int i = 0; i < MAX_TRACKS; i++)
+    if (tracks[i].used && tracks[i].hits >= TRACK_CONFIRM && tracks[i].along < t.along &&
+        (prev < 0 || tracks[i].along > tracks[prev].along)) prev = i;
+  float holdS = 0.0f, holdTgt = 0.0f;
+  if (prev >= 0) {
+    holdS = tracks[prev].along + PASS_HOLD_MM - laneAlongMm + back;
+    float g; passTargets(tracks[prev], g, holdTgt);
+    if (!tracks[prev].hug && !tracks[prev].tight) holdTgt = g;
+  }
+  float psi  = wrapDeg(gHeading - laneHeading);
+  float y    = laneOffMm;
+  float d0   = SERVO_TRUE_STRAIGHT - lastServoCmd;
+  float v    = gSpeedMmps;
+  if (back > 0.0f) { y -= 0.5f * back * sinf(psi * DEG_TO_RAD); psi = 0.0f; d0 = 0.0f; v = 0.0f; }
+  return reachSim(y, psi, d0, tgt, rel, t.lat, passRight(t.color), v, holdS, holdTgt);
+}
+
+// Reversing blind: air between the rear corner and the wall it swings toward.
+// A car yawed psi (+ = nose left) backs away to the RIGHT (and the other way
+// round), its rear corner already HALF_LEN sin|psi| out that way.
+float rearWallGap() {
+  float psi = wrapDeg(gHeading - laneHeading) * DEG_TO_RAD;
+  float reach = CAR_HALF_LEN_MM * fabsf(sinf(psi)) + CAR_HALF_W_MM * cosf(psi);
+  return (psi >= 0.0f) ? (laneOffMm - reach) - wallLatRight()
+                       : wallLatLeft() - (laneOffMm + reach);
+}
+
+// May a BACKOFF start here? The reverse heading hold straightens the car at
+// up to full lock, so the rear keeps drifting toward that wall for about
+// TURN_RADIUS (1 - cos psi) and then backs straight; the rear corner itself
+// swings away as the nose comes round. 0 = no, the rear would reach the wall.
+float backoffWallLimit() {
+  float psi = wrapDeg(gHeading - laneHeading) * DEG_TO_RAD;
+  float drift = TURN_RADIUS_MM * (1.0f - cosf(psi));
+  return (rearWallGap() - drift >= BACKOFF_WALL_MM) ? 1e9f : 0.0f;
+}
+
+// Shortest reverse (BACKOFF_MIN_MM .. avail, 20 mm steps) after which target
+// tgt clears by BACKOFF_MARGIN_MM; -1 = none within avail.
+float planBackoff(const PillarTrack &t, float tgt, float avail) {
+  for (float b = BACKOFF_MIN_MM; b <= avail + 0.5f; b += 20.0f)
+    if (reachFrom(t, tgt, b) >= BACKOFF_MARGIN_MM) return b;
+  return -1.0f;
 }
 
 bool trackConfirmed(int i) { return tracks[i].used && tracks[i].hits >= TRACK_CONFIRM; }
@@ -668,6 +907,72 @@ int lastSignOfStraight() {
   return (best >= 0) ? tracks[best].color : lastPassedColor;
 }
 
+const char *colName(int c) { return c == VIS_RED ? "RED" : (c == VIS_GREEN ? "GREEN" : "none"); }
+
+// Once per new LiDAR revolution, for the nearest sign ahead (see REACH above).
+void reachDecide(int k, float rel) {
+  PillarTrack &t = tracks[k];
+  if (k != reachTrack) { reachTrack = k; reachBad = 0; }
+  if (rel > REACH_DECIDE_FAR_MM || rel < REACH_DECIDE_NEAR_MM || t.hits < REACH_MIN_HITS) {
+    reachBad = 0; reachPause = false;
+    return;
+  }
+  if (t.hug && t.backedMm >= BACKOFF_MAX_MM) return;     // committed: nothing left to decide
+  float gap, bound;
+  passTargets(t, gap, bound);
+  float clr = reachFrom(t, t.hug ? bound : gap, 0.0f);
+  reachClearMm = clr;
+  if (clr >= 0.0f) { reachBad = 0; reachPause = false; return; }
+  if (++reachBad < REACH_CONFIRM) {
+    if (reachBad == 1 && REACH_PAUSE_MS > 0) {
+      reachPause = true; reachPauseMs = millis();
+      Serial.print(F("# REACH pause, clr=")); Serial.println((int)clr);
+    }
+    return;
+  }
+  reachBad = 0;
+  reachPause = false;
+
+  Serial.print(F("# REACH ")); Serial.print(colName(t.color));
+  Serial.print(F(" rel=")); Serial.print((int)rel);
+  Serial.print(F(" lat=")); Serial.print((int)t.lat);
+  Serial.print(F(" off=")); Serial.print((int)laneOffMm);
+  Serial.print(F(" yaw=")); Serial.print(wrapDeg(gHeading - laneHeading), 1);
+  Serial.print(F(" v=")); Serial.print((int)gSpeedMmps);
+  Serial.print(F(" clr=")); Serial.print((int)clr);
+
+  // cheapest first: the rule line instead of the gap centre
+  if (!t.hug) {
+    float cb = reachFrom(t, bound, 0.0f);
+    if (cb >= 0.0f) {
+      t.hug = true;
+      Serial.print(F(" -> HUG (line clr=")); Serial.print((int)cb); Serial.println(')');
+      return;
+    }
+  }
+  float avail = fminf(BACKOFF_MAX_MM - t.backedMm, laneAlongMm + BACKOFF_BEHIND_MM);
+  float wallLim = backoffWallLimit();
+  if (wallLim < avail) {                       // yawed near a wall: the rear would hit it
+    avail = wallLim;
+    Serial.print(F(" [rear too close to the wall to reverse]"));
+  }
+  if (!BACKOFF_ENABLE || avail < BACKOFF_MIN_MM) {
+    t.hug = true;
+    t.backedMm = BACKOFF_MAX_MM;                  // never asks again
+    Serial.println(F(" -> COMMIT (no reverse budget)"));
+    return;
+  }
+  bool  hugAfter = false;
+  float back = planBackoff(t, gap, avail);
+  if (back < 0.0f) { back = planBackoff(t, bound, avail); hugAfter = true; }
+  if (back < 0.0f) { back = avail;                        hugAfter = true; }
+  t.hug = hugAfter;
+  backoffWanted = k;
+  backoffPlanMm = back;
+  Serial.print(F(" -> BACKOFF ")); Serial.print((int)back);
+  Serial.println(hugAfter ? F(" mm, then the line") : F(" mm, then the gap"));
+}
+
 void updatePlanner() {
   // lane distance: encoder projected onto the lane direction (negative when reversing)
   long enc = readEncoder();
@@ -677,9 +982,8 @@ void updatePlanner() {
 
   if (!lidarNewFrame) return;
   laneOffOk = laneOffset(laneOffMm);
-  if (!plannerEnabled) { latYawCmd = 0.0f; passActive = false; backoffWanted = -1; passFeasible = true; return; }
+  if (!plannerEnabled) { latYawCmd = 0.0f; passActive = false; backoffWanted = -1; return; }
   addSighting(sign1);
-  addSighting(sign2);
 
   // tracks in play: everything still within PASS_HOLD behind, up to and
   // including the NEAREST sign ahead (farther ones wait their turn)
@@ -687,10 +991,14 @@ void updatePlanner() {
   for (int i = 0; i < MAX_TRACKS; i++) {
     if (!tracks[i].used) continue;
     float rel = tracks[i].along - laneAlongMm;
-    if (rel < -PASS_HOLD_MM) {                                               // passed
-      if (tracks[i].hits >= TRACK_CONFIRM) lastPassedColor = tracks[i].color;
-      tracks[i].used = false; continue;
+    if (rel < -TRACK_KEEP_BEHIND_MM) { tracks[i].used = false; continue; }   // long gone
+    if (rel < -PASS_HOLD_MM) {                                               // passed: out of play,
+      if (!tracks[i].passed && tracks[i].hits >= TRACK_CONFIRM)              //   but remembered
+        lastPassedColor = tracks[i].color;
+      tracks[i].passed = true;
+      continue;
     }
+    tracks[i].passed = false;                                                // (back in play after a reverse)
     if (tracks[i].hits < TRACK_CONFIRM) {                                    // not trusted yet
       if (laneAlongMm - tracks[i].lastSeen > TRACK_FORGET_MM) tracks[i].used = false;
       continue;
@@ -698,78 +1006,84 @@ void updatePlanner() {
     if (rel > 0 && rel < nearestAhead) { nearestAhead = rel; nearestIdx = i; }
   }
 
-  float lo = -LANE_LIMIT_MM, hi = LANE_LIMIT_MM;
-  float urgentRel = 1e9, urgentBound = 0; int urgentIdx = -1; bool any = false;
+  // TIGHT PAIRS: consecutive confirmed signs (by lane position) passed on
+  // opposite sides, closer than PAIR_TIGHT_MM - both hug, with the tight margin.
+  // Sticky per track: decided once, never undone mid-pass.
   for (int i = 0; i < MAX_TRACKS; i++) {
     if (!trackConfirmed(i)) continue;
+    int nx = -1;
+    for (int j = 0; j < MAX_TRACKS; j++)
+      if (j != i && trackConfirmed(j) && tracks[j].along > tracks[i].along &&
+          (nx < 0 || tracks[j].along < tracks[nx].along)) nx = j;
+    if (nx < 0 || passRight(tracks[i].color) == passRight(tracks[nx].color)) continue;
+    if (tracks[nx].along - tracks[i].along >= PAIR_TIGHT_MM) continue;
+    if (!tracks[i].tight || !tracks[nx].tight) {
+      tracks[i].tight = tracks[nx].tight = true;
+      Serial.print(F("# PAIR tight ")); Serial.print(colName(tracks[i].color));
+      Serial.print(F(" -> ")); Serial.print(colName(tracks[nx].color));
+      Serial.print(F(" gap=")); Serial.println((int)(tracks[nx].along - tracks[i].along));
+    }
+  }
+
+  float lo = -LANE_LIMIT_MM, hi = LANE_LIMIT_MM;
+  float urgentRel = 1e9, urgentBound = 0; int urgentIdx = -1; bool any = false, beside = false;
+  for (int i = 0; i < MAX_TRACKS; i++) {
+    if (!trackConfirmed(i) || tracks[i].passed) continue;
     float rel = tracks[i].along - laneAlongMm;
     if (rel > nearestAhead + 1.0f) continue;
     any = true;
+    if (fabs(rel) <= alongsideMm()) beside = true;       // (a passed sign no longer caps the yaw:
+                                                         //   host sim, the late swing hit the next one)
     float bound;
-    if (passRight(tracks[i].color)) { bound = tracks[i].lat - PASS_CLEAR_MM; if (bound < hi) hi = bound; }
-    else                            { bound = tracks[i].lat + PASS_CLEAR_MM; if (bound > lo) lo = bound; }
+    if (passRight(tracks[i].color)) { bound = tracks[i].lat - passClear(tracks[i]); if (bound < hi) hi = bound; }
+    else                            { bound = tracks[i].lat + passClear(tracks[i]); if (bound > lo) lo = bound; }
     if (rel < urgentRel) { urgentRel = rel; urgentBound = bound; urgentIdx = i; }
   }
   passActive = any;
 
   // Default target. No sign in play: lane centre, or the planned corner-exit
   // offset for the first stretch after a corner. A sign in play: the middle of
-  // the gap between the most urgent sign's face and the wall on its passing side.
+  // the gap between the most urgent sign's face and the wall on its passing
+  // side - or its rule line, once REACH has said the gap is out of reach.
   float target = 0.0f;
   if (!any) {
     if (cornerCount > 0 && laneAlongMm < POST_CORNER_BOOST_MM) target = cornerExitCmd;
   } else {
-    const PillarTrack &u = tracks[urgentIdx];
-    float mid = passRight(u.color) ? 0.5f * ((u.lat - PILLAR_HALF_MM) + wallLatRight())
-                                   : 0.5f * ((u.lat + PILLAR_HALF_MM) + wallLatLeft());
-    target = GAP_CENTRE_W * mid;
+    float gap, bound;
+    passTargets(tracks[urgentIdx], gap, bound);
+    target = tracks[urgentIdx].hug ? bound : gap;
   }
   if (lo > hi) target = urgentBound;                     // conflict: most urgent sign wins
   else         target = constrain(target, lo, hi);
 
   float aimMm = CENTRE_AIM_MM;
-  if (!any) passFeasible = true;     // with a sign in play it keeps its last computed value
   if (any) {
     // aim at the pass point PASS_LEAD before the nearest sign: the swerve
     // sharpens as it nears and arrives in time. Alongside / past: gentle hold.
-    if (nearestAhead < 1e8 && nearestAhead > PASS_LEAD_MM)
-      aimMm = fmaxf(nearestAhead - PASS_LEAD_MM, PASS_AIM_MIN_MM);
-    else
-      aimMm = HOLD_AIM_MM;
+    aimMm = (nearestAhead < 1e8) ? passAimMm(nearestAhead) : HOLD_AIM_MM;
 
-    // Reach check: can the car still get to the target before the nearest
-    // sign? If not, ask for a BACKOFF (reverse for run-up) while that sign
-    // has budget left; otherwise commit to the correct side as is.
-    if (laneOffOk && nearestIdx >= 0) {
-      // Feasibility is judged on the RULE, not on comfort: the nearest lane
-      // position that clears every sign in play (the bound), not the gap
-      // centre. If the gap centre is out of reach but the bound is not, the
-      // car aims at the bound instead - hugging a sign beats missing its side.
-      float legal  = (lo > hi) ? urgentBound : constrain(laneOffMm, lo, hi);
-      float need   = fabs(legal - laneOffMm);
-      float sAvail = nearestAhead - REACH_LEAD_MM;
-      float yawNow = wrapDeg(gHeading - laneHeading) * DEG_TO_RAD;       // + = left
-      float psi0   = (legal > laneOffMm) ? yawNow : -yawNow;              // + = toward target
-      float reach  = latReach(sAvail, psi0);
-      if (fabs(target - laneOffMm) > reach) target = legal;
-      reachNeedMm = need; reachHaveMm = reach;
-      passFeasible = (need <= REACH_NEED_MIN_MM) || (need + BACKOFF_MARGIN_MM <= reach);
-      bool unreachable = (need > REACH_NEED_MIN_MM) && (need > reach + REACH_MARGIN_MM);
-      bool roomBehind  = laneAlongMm > -BACKOFF_BEHIND_MM + 20.0f;
-      backoffWanted = (unreachable && BACKOFF_ENABLE && roomBehind &&
-                       tracks[nearestIdx].backedMm < BACKOFF_MAX_MM) ? nearestIdx : -1;
-    }
+    // REACH: judged on new revolutions only, while DRIVE / FINAL (not while
+    // reversing), for the nearest sign ahead (the one being passed, if any,
+    // is part of the simulation - see reachFrom).
+    bool driving = currentState == STATE_DRIVE_TO_CORNER || currentState == STATE_FINAL_STRAIGHT;
+    if (lidarNewRev && driving && laneOffOk && nearestIdx >= 0)
+      reachDecide(nearestIdx, nearestAhead);
+    else if (nearestIdx < 0)
+      reachBad = 0;
   } else {
     backoffWanted = -1;
+    reachBad = 0;
   }
 
   latTarget = constrain(target, -LANE_LIMIT_MM, LANE_LIMIT_MM);
 
   if (!laneOffOk) { latYawCmd = 0.0f; return; }          // no walls: just hold heading
   // Centring is gentle (CENTRE_YAW_MAX) so the car does not weave; right
-  // after a corner it gets POST_CORNER_YAW_MAX, with a sign in play PASS_YAW_MAX.
+  // after a corner it gets POST_CORNER_YAW_MAX, with a sign in play PASS_YAW_MAX,
+  // and with the body beside a sign ALONGSIDE_YAW_MAX (the swept corner).
   float ymax = passActive ? PASS_YAW_MAX
              : (laneAlongMm < POST_CORNER_BOOST_MM ? POST_CORNER_YAW_MAX : CENTRE_YAW_MAX);
+  if (beside) ymax = fminf(ymax, ALONGSIDE_YAW_MAX);
   // + lateral error = target is to the LEFT = yaw left
   latYawCmd = constrain(atan2f(latTarget - laneOffMm, aimMm) / DEG_TO_RAD, -ymax, ymax);
 }
@@ -834,6 +1148,7 @@ void serviceSensors() {
     digitalWrite(LED3_PIN, gRawColor == COLOR_BLUE   ? HIGH : LOW);
   }
 
+  odoUpdate();
   updatePlanner();
   updateLevel();
 }
@@ -911,12 +1226,8 @@ void initHardware() {
 // ============================================================
 // DRIVE STEERING  = heading PID on (lane heading + planner yaw)
 // ============================================================
-       float HEAD_KP        = 2.0;
-       float YAW_FILT_ALPHA = 0.35;
-       float SERVO_SLEW     = 2.5;     // servo deg per IMU update (~100 Hz)
-       float INTEGRAL_CLAMP = 300.0;
-       float HEAD_KI        = 0.0;
-       float HEAD_KD        = 0.0;
+// (the gains HEAD_KP ... HEAD_KD are declared with the calibration at the
+// top: the REACH simulation uses them too)
 
 unsigned long pidPrevTime  = 0;
 float         pidIntegral  = 0.0;
@@ -1048,10 +1359,13 @@ void recoverStep() {
 }
 
 // ============================================================
-// OVERLAY: BACKOFF  (reverse until the sign's correct side is reachable)
+// OVERLAY: BACKOFF  (reverse the distance the REACH plan asked for)
 // ============================================================
 int   backoffTrack = -1;
 float backoffStartMm = 0.0;          // the track's backedMm when this backoff began
+float backoffGoalMm  = 0.0;          // this backoff's planned distance
+long  backoffLastTicks = 0;          // stuck watch: last encoder reading that moved
+unsigned long backoffLastMoveMs = 0;
 
 void backoffStep() {
   if (!entered) {
@@ -1059,23 +1373,35 @@ void backoffStep() {
     setMotorSpeed(0);
     resetHeadingPid();
     overlayBaseTicks = readEncoder();
+    backoffLastTicks = overlayBaseTicks;
+    backoffLastMoveMs = millis();
     backoffStartMm = (backoffTrack >= 0) ? tracks[backoffTrack].backedMm : 0.0f;
-    Serial.print(F("# BACKOFF ")); Serial.print(tracks[backoffTrack].color == VIS_RED ? F("RED") : F("GREEN"));
-    Serial.print(F(" need ")); Serial.print((int)reachNeedMm);
-    Serial.print(F(" reach ")); Serial.println((int)reachHaveMm);
+    backoffGoalMm  = backoffPlanMm;
+    Serial.print(F("# BACKOFF ")); Serial.print(backoffTrack >= 0 ? colName(tracks[backoffTrack].color) : "?");
+    Serial.print(F(" plan ")); Serial.print((int)backoffGoalMm);
+    Serial.print(F(" mm, clr ")); Serial.println((int)reachClearMm);
   }
-  plannerEnabled = true;             // keeps re-checking the reach while reversing
+  plannerEnabled = true;             // keeps the tracks moving with the car (no decisions)
   bool gone = (backoffTrack < 0) || !tracks[backoffTrack].used;
-  float backed = absEnc(readEncoder() - overlayBaseTicks) / TICKS_PER_MM;
+  long now = readEncoder();
+  float backed = absEnc(now - overlayBaseTicks) / TICKS_PER_MM;
   if (!gone) tracks[backoffTrack].backedMm = backoffStartMm + backed;
+  if (absEnc(now - backoffLastTicks) > (long)(10.0f * TICKS_PER_MM)) {
+    backoffLastTicks = now; backoffLastMoveMs = millis();
+  }
 
+  bool done   = backed >= backoffGoalMm;
   bool capped = !gone && (tracks[backoffTrack].backedMm >= BACKOFF_MAX_MM ||
                           laneAlongMm <= -BACKOFF_BEHIND_MM);
-  bool enough = backed >= BACKOFF_MIN_MM;
-  if (gone || capped || (passFeasible && enough)) {
-    if (capped) tracks[backoffTrack].backedMm = BACKOFF_MAX_MM;   // budget spent: commit, never re-ask
-    Serial.print(capped ? F("# backoff capped, commit after ") : F("# backoff done after "));
+  bool stuck  = millis() - backoffLastMoveMs > BACKOFF_TIMEOUT_MS;
+  bool wall   = laneOffOk && rearWallGap() < 0.5f * BACKOFF_WALL_MM;   // hard stop
+  if (gone || done || capped || stuck || wall) {
+    if ((capped || stuck || wall) && !gone) tracks[backoffTrack].backedMm = BACKOFF_MAX_MM;   // commit, never re-ask
+    Serial.print(done ? F("# backoff done after ") : stuck ? F("# backoff STUCK after ")
+                      : wall ? F("# backoff stopped, rear near the wall, after ")
+                      : capped ? F("# backoff capped, commit after ") : F("# backoff: sign lost after "));
     Serial.print((int)backed); Serial.println(F(" mm"));
+    reachBad = 0;
     popOverlay();
     return;
   }
@@ -1119,6 +1445,7 @@ void waitStartStep() {
   clearTracks();
   zeroEncoder();                     // zero FIRST, then take the lane origin from it
   resetLaneAlong();
+  overdueLogged = false;
   Serial.println(F("# GO"));
   goState(STATE_DRIVE_TO_CORNER);
 }
@@ -1136,18 +1463,20 @@ uint8_t sideOpenRevs[2];
 void resetSideCounters() { sideWallRevs[0] = sideWallRevs[1] = 0; sideOpenRevs[0] = sideOpenRevs[1] = 0; }
 
 // one new revolution of evidence for one side; true = that side is open now.
-// Open = the side beam reads past SIDE_OPEN_MM AND (with SIDE_OPEN_NEED_CONE)
-// the 45 deg cone fit on that side has lost the wall - the beam alone can be
-// fooled, the cone needs most of a 45 deg wedge of wall to be missing.
-bool sideEvidence(uint8_t s, uint16_t mm, uint16_t cone) {
-  bool open = mm > SIDE_OPEN_MM && (!SIDE_OPEN_NEED_CONE || cone > LANE_VALID_MAX_MM);
+// Open = the side beam reads past SIDE_OPEN_MM (v9: the beam alone, no cone
+// test). `candidate` = this side may open this revolution (before the
+// direction is known only the side with the longer beam may). `overdue` =
+// the odometry says the corner is past due: one revolution is enough and no
+// wall history is needed.
+bool sideEvidence(uint8_t s, uint16_t mm, bool candidate, bool overdue) {
+  bool open = candidate && mm > SIDE_OPEN_MM;
   if (open) {
-    if (sideWallRevs[s] >= SIDE_WALL_REVS && sideOpenRevs[s] < 255) sideOpenRevs[s]++;
+    if ((overdue || sideWallRevs[s] >= SIDE_WALL_REVS) && sideOpenRevs[s] < 255) sideOpenRevs[s]++;
   } else {
     sideOpenRevs[s] = 0;
     if (mm <= SIDE_OPEN_MM && sideWallRevs[s] < 255) sideWallRevs[s]++;
   }
-  return sideOpenRevs[s] >= SIDE_OPEN_REVS;
+  return sideOpenRevs[s] >= (overdue ? 1 : SIDE_OPEN_REVS);
 }
 
 // ---- how this corner will be turned (decided at the trigger) ----
@@ -1190,23 +1519,35 @@ void driveStep() {
   bool aligned = fabs(wrapDeg(gHeading - laneHeading)) < TURN_TRIGGER_MAX_YAW;
   if (lidarStale || !aligned) { sideOpenRevs[0] = sideOpenRevs[1] = 0; return; }
   if (!lidarNewRev) return;                                  // beams change once per revolution
-  if (cornerCount > 0 && runMm < CORNER_LOCKOUT_MM) return;  // still leaving the last corner
 
-  bool openL = (!dirLocked || !clockwiseMode) && sideEvidence(0, lidarL, coneL);
-  bool openR = (!dirLocked ||  clockwiseMode) && sideEvidence(1, lidarR, coneR);
+  // odometry window - after the first corner only (the start spot is unknown)
+  bool gated   = cornerCount > 0;
+  bool tooSoon = gated && runMm < CORNER_MIN_RUN_MM;
+  bool overdue = gated && runMm > CORNER_FALLBACK_RUN_MM;
+  if (overdue && !overdueLogged) {
+    overdueLogged = true;
+    Serial.print(F("# corner overdue, run=")); Serial.println((int)runMm);
+  }
+
+  // candidates: after the lock the inner side only; before it the side with
+  // the LONGER beam (the outer wall never ends, so the longer one is the
+  // opening). Too soon: nobody - but the wall history still counts.
+  bool longL = lidarL >= lidarR;
+  bool candL = !tooSoon && (dirLocked ? !clockwiseMode : longL);
+  bool candR = !tooSoon && (dirLocked ?  clockwiseMode : !longL);
+  bool openL = sideEvidence(0, lidarL, candL, overdue);
+  bool openR = sideEvidence(1, lidarR, candR, overdue);
   if (!openL && !openR) return;
   if (!dirLocked) {
-    if (openL && openR) {                                    // both at once: not a corner we can read
-      sideOpenRevs[0] = sideOpenRevs[1] = 0;
-      return;
-    }
     dirLocked     = true;
     clockwiseMode = openR;                                   // outer wall never ends: open side = inner
-    Serial.println(clockwiseMode ? F("# LOCKED CW (right side opened)")
-                                 : F("# LOCKED CCW (left side opened)"));
+    Serial.print(clockwiseMode ? F("# LOCKED CW (right side opened) L=") : F("# LOCKED CCW (left side opened) L="));
+    Serial.print(lidarL); Serial.print(F(" R=")); Serial.println(lidarR);
   }
   Serial.print(F("# turn: side open ")); Serial.print(turnSideMm());
-  Serial.print(F(" run=")); Serial.println((int)runMm);
+  Serial.print(F(" run=")); Serial.print((int)runMm);
+  Serial.println(overdue ? F(" (overdue rule)") : F(""));
+  overdueLogged = false;
 
   // segment lengths for the final straight: A = start -> first trigger,
   // L = the start straight driven in full (laps 2 and 3, averaged)
@@ -1270,6 +1611,8 @@ void driveStep() {
        float    TURN_KP            = 2.5;    // easing: servo deg per deg still to go
        float    TURN_MIN_STEER     = 8.0;
        float    TURN_DONE_DEG      = 4.0;    // facing the new lane within this = done
+       float    TURN_REV_INNER_MM  = 150.0;  // v9: PLAN_REVERSE approach steers to this far on the
+                                             //   inner side of the old lane (0 = straight, as v7)
        float    TURN_REV_CAP_CM    = 60.0;   // reverse at most this far (blind); a 90 deg
                                              //   arc at ~27 cm radius is ~42 cm
        unsigned long TURN_VIEW_MS  = 200;    // look down the new lane before driving (0 = off)
@@ -1341,9 +1684,8 @@ void turningStep() {
     case TP_APPROACH: {
       // a sign on the turn side, well off the old lane's line, belongs to the
       // next straight - remember its colour for the override
-      for (const Sighting *sg : { &sign1, &sign2 })
-        if (sg->valid && sg->x > 150.0f && (clockwiseMode ? sg->y < -300.0f : sg->y > 300.0f))
-          nextStraightColor = sg->color;
+      if (sign1.valid && sign1.x > 150.0f && (clockwiseMode ? sign1.y < -300.0f : sign1.y > 300.0f))
+        nextStraightColor = sign1.color;
       bool early = TURN_NEXT_OVERRIDE && turnPlan == PLAN_ARC && needsInnerOfNewLane(nextStraightColor);
       uint16_t stopAt = (turnPlan == PLAN_REVERSE) ? TURN_INNER_FRONT_MM
                       : (early ? TURN_NEXT_INNER_FRONT_MM : TURN_OUTER_FRONT_MM);
@@ -1365,7 +1707,17 @@ void turningStep() {
         break;
       }
       setMotorSpeed(DRIVE_PWM);
-      updateDriveSteer(turnOldLane, false);     // straight on the old lane heading
+      if (turnPlan == PLAN_REVERSE && TURN_REV_INNER_MM > 0.0f && laneOffOk) {
+        // v9: the reverse arc swings the car ~one turn radius toward the old
+        // lane's OUTER wall - start it from the inner half (host sim: a
+        // reverse corner begun right of centre hit that wall 11 times in 60 runs)
+        float inner = clockwiseMode ? -1.0f : 1.0f;            // + lane offset = left
+        float yaw = constrain(atan2f(inner * TURN_REV_INNER_MM - laneOffMm, CENTRE_AIM_MM) / DEG_TO_RAD,
+                              -CENTRE_YAW_MAX, CENTRE_YAW_MAX);
+        updateDriveSteer(wrapDeg(turnOldLane + yaw), false);
+      } else {
+        updateDriveSteer(turnOldLane, false);   // straight on the old lane heading
+      }
       break;
     }
     case TP_FWD: {
@@ -1451,7 +1803,7 @@ void finalStraightStep() {
 // Derived values (PASS_CLEAR_MM, LANE_LIMIT_MM, TICKS_PER_MM) are recomputed
 // on every set, so arrival order never matters.
 
-const uint16_t PARAM_VERSION        = 6;     // bump when ids are added/removed
+const uint16_t PARAM_VERSION        = 8;     // bump when ids are added/removed
 const uint8_t  PARAM_DUMP_PER_LOOP  = 2;
 const uint16_t PARAM_TX_HEADROOM    = 96;    // bytes free before a dump line
 
@@ -1497,8 +1849,8 @@ const ParamDesc PARAMS[] = {
   PC(SIDE_OPEN_REVS,        G_TURN,    1,    20),
   PC(SIDE_WALL_REVS,        G_TURN,    0,    20),
   PF(TURN_TRIGGER_MAX_YAW,  G_TURN,    5,    90),
-  PF(CORNER_LOCKOUT_MM,     G_TURN,    0,  2000),
-  PB(SIDE_OPEN_NEED_CONE,   G_TURN),
+  PF(CORNER_MIN_RUN_MM,     G_TURN,    0,  5000),
+  PF(CORNER_FALLBACK_RUN_MM,G_TURN,    0,  8000),
   PS(TURN_OUTER_FRONT_MM,   G_TURN,   80,  2000),
   PS(TURN_INNER_FRONT_MM,   G_TURN,   80,  2000),
   PF(TURN_APPROACH_CAP_CM,  G_TURN,   10,   400),
@@ -1511,6 +1863,7 @@ const ParamDesc PARAMS[] = {
   PF(TURN_MIN_STEER,        G_TURN,    0,    45),
   PF(TURN_DONE_DEG,         G_TURN,  0.5,    30),
   PF(TURN_REV_CAP_CM,       G_TURN,    5,   150),
+  PF(TURN_REV_INNER_MM,     G_TURN,    0,   400),
   PL(TURN_VIEW_MS,          G_TURN,    0,  3000),
   PB(TURN_NEXT_OVERRIDE,    G_TURN),
   PS(TURN_NEXT_INNER_FRONT_MM, G_TURN, 80, 2000),
@@ -1527,8 +1880,11 @@ const ParamDesc PARAMS[] = {
   // ---- lane / sign planner ----
   PF(CORRIDOR_MM,           G_PLAN,  300,  2000),
   PF(CAR_HALF_W_MM,         G_PLAN,   20,   200),
+  PF(CAR_HALF_LEN_MM,       G_PLAN,   20,   300),
   PF(PILLAR_HALF_MM,        G_PLAN,    5,   100),
   PF(PASS_MARGIN_MM,        G_PLAN,    0,   300),
+  PF(PASS_MARGIN_TIGHT_MM,  G_PLAN,    0,   300),
+  PF(PAIR_TIGHT_MM,         G_PLAN,    0,  3000),
   PF(WALL_MARGIN_MM,        G_PLAN,    0,   300),
   PF(GAP_CENTRE_W,          G_PLAN,    0,     1),
   PF(CENTRE_AIM_MM,         G_PLAN,  100,  2000),
@@ -1550,9 +1906,14 @@ const ParamDesc PARAMS[] = {
   PF(PASS_YAW_MAX,          G_PASS,    5,    89),
   PF(PASS_HOLD_MM,          G_PASS,    0,   600),
   PF(TURN_RADIUS_MM,        G_PASS,  100,   800),
-  PF(REACH_LEAD_MM,         G_PASS,    0,   400),
-  PF(REACH_NEED_MIN_MM,     G_PASS,    0,   300),
-  PF(REACH_MARGIN_MM,       G_PASS,    0,   300),
+  PF(ALONGSIDE_YAW_MAX,     G_PASS,    2,    89),
+  PF(REACH_SAFETY_MM,       G_PASS,  -50,   200),
+  PF(REACH_DECIDE_NEAR_MM,  G_PASS,    0,  1500),
+  PF(REACH_DECIDE_FAR_MM,   G_PASS,  100,  3000),
+  PC(REACH_MIN_HITS,        G_PASS,    1,    20),
+  PC(REACH_CONFIRM,         G_PASS,    1,    20),
+  PF(REACH_SPEED_MMPS,      G_PASS,   50,  3000),
+  PL(REACH_PAUSE_MS,        G_PASS,    0,  3000),
   PF(TRACK_MATCH_MM,        G_PASS,   50,   600),
   PF(TRACK_GAIN,            G_PASS, 0.05,     1),
   PC(TRACK_CONFIRM,         G_PASS,    1,    20),
@@ -1571,6 +1932,8 @@ const ParamDesc PARAMS[] = {
   PF(BACKOFF_MARGIN_MM,     G_BACK,    0,   300),
   PF(BACKOFF_BEHIND_MM,     G_BACK,    0,   600),
   PF(BACKOFF_MIN_MM,        G_BACK,    0,   500),
+  PL(BACKOFF_TIMEOUT_MS,    G_BACK,  200, 10000),
+  PF(BACKOFF_WALL_MM,       G_BACK,    0,   300),
 
   // ---- safety ----
   PS(WALL_PANIC_MM,         G_SAFE,    0,  1000),
@@ -1787,6 +2150,21 @@ void loop() {
 
   if (currentState != STATE_WAIT_START && currentState != STATE_FINISHED) {
     led1(lidarStale ? ((millis() / 100) & 1) : true);
+  }
+
+  // REACH pause: stopped, wheels where they are, until the verdict is in (or
+  // REACH_PAUSE_MS runs out). DRIVE / FINAL steps are skipped meanwhile.
+  static bool paused = false;
+  if (reachPause && (!moving() || millis() - reachPauseMs > REACH_PAUSE_MS)) reachPause = false;
+  if (reachPause) {
+    if (!paused) { paused = true; setMotorSpeed(0); }
+    return;
+  }
+  if (paused) {
+    paused = false;
+    resetHeadingPid();
+    prevServoCmd = lastServoCmd;
+    if (moving()) setMotorSpeed(DRIVE_PWM);
   }
 
   switch (currentState) {

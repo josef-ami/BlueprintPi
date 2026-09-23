@@ -269,8 +269,6 @@ def detector_report():
             # what the firmware would actually receive this frame
             "primary": None if not accepted else
                        {"colour": ob.NAMES[accepted[0][2]], "area": int(accepted[0][1])},
-            "secondary": None if len(accepted) < 2 else
-                         {"colour": ob.NAMES[accepted[1][2]], "area": int(accepted[1][1])},
             "blobs": blobs}
 
 
@@ -459,8 +457,7 @@ async function refresh(){
     r.classes.map(c=>[c.name,c.n,c.mean||'--',c.min||'--',c.max||'--']));
   $('space').textContent=r.det.ok?('- classifying in '+r.det.space+
     ', min area '+r.det.min_area+
-    ' | sent: 1st '+(r.det.primary?r.det.primary.colour:'none')+
-    ', 2nd '+(r.det.secondary?r.det.secondary.colour:'none')):'- no frame yet';
+    ' | sent: '+(r.det.primary?r.det.primary.colour:'none')+' (largest blob)'):'- no frame yet';
   tbl($('det'),['colour','area','verdict'],
     (r.det.blobs||[]).map(b=>[b.colour,b.area,
       b.verdict==='ACCEPTED'?'<span class=ok>ACCEPTED</span>':
