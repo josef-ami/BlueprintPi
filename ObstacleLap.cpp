@@ -4,11 +4,25 @@
 #include <Wire.h>
 #include <SparkFun_BNO08x_Arduino_Library.h>
 #include <Adafruit_TCS34725.h>
+#include "chokeslam_stream.h"   // chokeSLAM: $IMU stream to the Pi (see CHOKESLAM STREAM below)
 
 #ifndef DEG_TO_RAD
 #define DEG_TO_RAD 0.017453292519943295
 #endif
 
+// ============================================================
+// chokeSLAM ADDITION (decision #52) - everything else in this file is the
+// v7 obstacle-round firmware unchanged.
+//   Adds the chokeSLAM $IMU line to this sketch's USB output:
+//     $IMU,<seq>,<t_ms>,<enc>,<yaw>\n   100 Hz   (chokeslam_stream.h)
+//   enc = cumulative count since power-on, never reset: zeroEncoder() now
+//         banks the count into streamEncBase before clearing TIM5, so this
+//         sketch's own relative readEncoder() is unchanged.
+//   yaw = raw Game Rotation Vector yaw (readYaw(): no zero offset, no
+//         IMU_YAW_SIGN), captured when an IMU event arrives; lines stop
+//         when no event for STREAM_IMU_STALE_MS.
+//   The '#' and '!' lines below stay; the Pi skips them.
+// ============================================================
 // ============================================================
 // OBSTACLE ROUND - NON-BLOCKING FIRMWARE  (v7, param table v6)
 //
@@ -370,7 +384,9 @@ void setServoAngle(float angleDeg) {
 }
 
 // TIM5 encoder, negated so driving forward counts up
-void zeroEncoder() { TIM5->CNT = 0; }
+// chokeSLAM: bank the count before clearing, so the stream's count never resets
+long streamEncBase = 0;
+void zeroEncoder() { streamEncBase += -(int32_t)TIM5->CNT; TIM5->CNT = 0; }
 long readEncoder() { return -(int32_t)TIM5->CNT; }
 long absEnc(long v) { return v < 0 ? -v : v; }
 
@@ -390,6 +406,21 @@ float readYaw() {
 float readHeading() {
   float h = fmod(readYaw() - initialYawOffset + 540.0, 360.0) - 180.0;
   return IMU_YAW_SIGN * h;
+}
+
+// ---- CHOKESLAM STREAM: raw yaw of the latest IMU event ----
+const unsigned long STREAM_IMU_STALE_MS = 100;   // no event this long = no $IMU lines
+float         streamYawRaw  = 0.0f;
+unsigned long streamYawMs   = 0;
+bool          streamYawSeen = false;
+
+void streamCaptureYaw() {
+  float qI = myIMU.getQuatI(), qJ = myIMU.getQuatJ();
+  float qK = myIMU.getQuatK(), qReal = myIMU.getQuatReal();
+  if (qI == 0.0f && qJ == 0.0f && qK == 0.0f && qReal == 0.0f) return;   // not a real reading
+  streamYawRaw  = readYaw();
+  streamYawMs   = millis();
+  streamYawSeen = true;
 }
 
 void zeroYaw() {
@@ -820,6 +851,7 @@ void serviceSensors() {
   if (myIMU.getSensorEvent() &&
       myIMU.getSensorEventID() == SENSOR_REPORTID_GAME_ROTATION_VECTOR) {
     gImuFresh = true;
+    streamCaptureYaw();                 // chokeSLAM stream
     float h = readHeading();
     unsigned long now = millis();
     float dt = (now - gPrevHT) / 1000.0;
@@ -1736,6 +1768,10 @@ void serviceButton() {
 
 void loop() {
   serviceSensors();
+
+  // chokeSLAM stream: runs from boot, before the Pi's first frame too
+  chokeslamStreamPoll((int32_t)(streamEncBase + readEncoder()), streamYawRaw,
+                      streamYawSeen && (millis() - streamYawMs) <= STREAM_IMU_STALE_MS);
   paramDumpStep();        // streamed, at most PARAM_DUMP_PER_LOOP lines
 
   // ---- startup gate: nothing runs until the Pi's first frame ----
