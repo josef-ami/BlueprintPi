@@ -92,6 +92,7 @@ class Spec:
 #   locate   turning a camera bearing + LiDAR range into a pillar position
 #   cand     LiDAR-only objects whose colour is not known yet (LazyGo edges)
 #   link     serial framing
+#   yolo     the trained pillar detector (sensors/yolo_detector.py)
 
 PI_SPECS = [
     # ---- camera ----
@@ -229,6 +230,21 @@ PI_SPECS = [
          "+/- degrees when picking the 0/90/270 beams"),
     Spec("STM_PUSH_PER_LOOP", 4, 1, 40, "link", "i",
          "tuning lines sent to the STM32 per loop; keep well under SEND_HZ budget"),
+
+    # ---- YOLO pillar detector (models/pillars26, YOLO26n at 416) ----
+    Spec("USE_YOLO", True, 0, 1, "yolo", "b",
+         "find pillars with the trained YOLO model; off = the Lab/HSV colour masking. "
+         "If the model cannot load, masking is used automatically"),
+    Spec("YOLO_BACKEND", 0, 0, 3, "yolo", "i",
+         "0 auto (ncnn, then openvino, then onnx), 1 ncnn, 2 openvino, 3 onnx"),
+    Spec("YOLO_THREADS", 3, 1, 4, "yolo", "i",
+         "CPU threads for inference; the LiDAR and serial loop need the rest"),
+    Spec("YOLO_CONF", 0.5, 0.05, 0.95, "yolo", "f",
+         "minimum confidence for a pillar; raise if phantom pillars appear, lower if far ones are missed"),
+    Spec("YOLO_IOU", 0.5, 0.1, 0.9, "yolo", "f",
+         "overlap above which two boxes of one colour count as the same pillar"),
+    Spec("YOLO_MIN_BOX_H", 0, 0, 200, "yolo", "i",
+         "ignore boxes shorter than this (640x480 px); 0 = keep every detection (reject code H)"),
 ]
 
 

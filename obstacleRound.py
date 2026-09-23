@@ -65,6 +65,20 @@ Replies from the firmware start with '!' (parameters) or '#' (log).
 Silence rules: lidar stale -> no frames are sent (commands still are).
 Camera stale (> VISION_STALE_S) -> color is sent as 2 (none).
 
+PILLAR DETECTION: YOLO FIRST, COLOUR MASKING AS THE FALLBACK
+  The camera thread finds pillars with the trained YOLO26n model in
+  models/pillars26/ (sensors/yolo_detector.py): 2 classes, GREEN PILLAR and
+  RED PILLAR, trained on frames from this car's own camera at 416 px. It runs
+  on ncnn, OpenVINO or onnxruntime - whichever is installed (YOLO_BACKEND 0 =
+  try them in that order), no torch needed. Tune tab, "YOLO detector":
+  USE_YOLO, backend, threads, confidence, NMS overlap, minimum box height.
+  If no backend can load the model, or USE_YOLO is off, the Lab/HSV masking
+  below does the job exactly as before. Everything after detection - bearing,
+  LiDAR range, the 18-field frame - is the same for both, so the STM32 cannot
+  tell which one found the pillar. The model was trained on RGB frames taken
+  with SWAP_RB on: keep it on, or red and blue swap and the model sees nonsense.
+  The Run tab shows which detector is live and its time per frame.
+
 A NOTE ON THE CAMERA MODEL
   config.json disagrees with itself: camera_intrinsics.K has fx = 383 px/rad,
   which on a 640 px frame is +/-48 deg, while hfov_deg says 160 (+/-80), a
@@ -93,6 +107,7 @@ from sensors.lidar import LidarThread
 from openRound import UART_PORT, UART_BAUD, load_tol, read_three, lidar_live, _u16
 
 import params as prm
+from sensors.yolo_detector import YoloDetector, DEFAULT_MODEL_DIR as YOLO_MODEL_DIR
 
 # ---------------- fixed, not tunable ----------------
 PROC_SIZE   = (320, 240)     # detection resolution
@@ -127,7 +142,7 @@ PI = prm.PiParams(prm.PI_SPECS)
 STM = prm.StmParams()
 
 _MIRRORED = [s.name for s in prm.PI_SPECS
-             if s.group in ("camera", "cone", "locate", "cand", "link", "lab")]
+             if s.group in ("camera", "cone", "locate", "cand", "link", "lab", "yolo")]
 
 # defaults, so the names exist before the first sync
 MIN_AREA_PROC = 250
@@ -162,6 +177,14 @@ CMD_REPEAT = 3
 BEARING_TOL_DEG = 2
 STM_PUSH_PER_LOOP = 4
 
+USE_YOLO = True
+YOLO_BACKEND = 0
+YOLO_THREADS = 3
+YOLO_CONF = 0.5
+YOLO_IOU = 0.5
+YOLO_MIN_BOX_H = 0
+YOLO_BACKENDS = ("auto", "ncnn", "openvino", "onnx")      # YOLO_BACKEND index
+
 USE_LAB = False
 FLOOR_L_MIN = 120
 FLOOR_AB_TOL = 14
@@ -188,7 +211,8 @@ sync_globals()
 lock = threading.Lock()
 vision = {"color": COL_NONE, "err": 0, "area": 0, "seq": 0, "t": 0.0,
           "box": None, "bearing": None,          # box in 640x480 px, for the overlay
-          "s_color": COL_NONE, "s_area": 0, "s_box": None, "s_bearing": None}
+          "s_color": COL_NONE, "s_area": 0, "s_box": None, "s_bearing": None,
+          "mode": "starting", "infer_ms": 0.0, "fps": 0.0, "yolo_error": None}
 latest_frame = None                              # RGB, only kept while someone watches
 viewers = 0
 
@@ -434,19 +458,53 @@ def find_pillars(hsv, lab, pf):
     return accepted, cands, floor
 
 
+def yolo_colour(name):
+    """Model class name -> wire colour code; None for a class that is not a
+    sign (e.g. a later 'magenta' parking class): shown, never steered by."""
+    n = name.upper()
+    if "RED" in n:
+        return COL_RED
+    if "GREEN" in n:
+        return COL_GREEN
+    return None
+
+
 class VisionThread(threading.Thread):
     """Reads the tunables fresh every frame, so the Tune tab is live: there is
     no restart, no re-open of the camera, and the thread never blocks on the
-    web side."""
+    web side. Changing USE_YOLO / YOLO_BACKEND / YOLO_THREADS reloads the
+    model on the next frame."""
 
     def __init__(self):
         super().__init__(name="Vision", daemon=True)
         self._halt = threading.Event()   # NOT _stop: that name is taken by Thread
         camera.load_intrinsics(camera.load_config())
         self.error = None
+        self.yolo = None
+        self.yolo_error = None
+        self._yolo_key = None
 
     def stop(self):
         self._halt.set()
+
+    def _detector(self):
+        """The YOLO detector for the current settings, or None = colour masking.
+        A failed load is not retried until one of the settings changes."""
+        if not USE_YOLO:
+            self._yolo_key, self.yolo = None, None
+            return None
+        key = (YOLO_BACKENDS[max(0, min(3, int(YOLO_BACKEND)))], int(YOLO_THREADS))
+        if key != self._yolo_key:
+            self._yolo_key, self.yolo = key, None
+            try:
+                self.yolo = YoloDetector(YOLO_MODEL_DIR, backend=key[0], threads=key[1])
+                self.yolo_error = None
+                note(f"[vision] YOLO on {self.yolo.backend} ({key[1]} threads, "
+                     f"{self.yolo.imgsz} px): {', '.join(self.yolo.names.values())}")
+            except Exception as e:
+                self.yolo_error = str(e)
+                note(f"[vision] YOLO unavailable, using colour masking: {e}")
+        return self.yolo
 
     def run(self):
         global latest_frame
@@ -461,34 +519,30 @@ class VisionThread(threading.Thread):
         sy = camera.FRAME_H / float(PROC_SIZE[1])
         centre = camera.FRAME_W // 2
         seq = 0
+        fps, t_prev = 0.0, time.monotonic()
         try:
             while not self._halt.is_set():
                 pf = PILLAR_FILTER                        # one read, one frame
                 frame = camera.grab_rgb(cam, SWAP_RB)
-                small = cv2.resize(frame, PROC_SIZE, interpolation=cv2.INTER_AREA)
-                hsv, lab = colour_spaces(small)
 
-                accepted, cands, floor = find_pillars(hsv, lab, pf)
+                # hits: (colour, area in 320x240 px, box in 640x480 px, confidence)
+                hits, cands, floor, mode = self._find(frame, pf, sx, sy)
 
                 def describe(hit):
-                    cnt, area, colour = hit
-                    x, y, w, h = cv2.boundingRect(cnt)
-                    return (colour,
-                            int((x + w / 2.0) * sx) - centre,
-                            int(area),
-                            (int(x * sx), int(y * sy),
-                             int((x + w) * sx), int((y + h) * sy)),
-                            bearing_from_px((x + w / 2.0) * sx, (y + h / 2.0) * sy))
+                    colour, area, (x0, y0, x1, y1), _ = hit
+                    cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+                    return (colour, int(cx) - centre, int(area), (x0, y0, x1, y1),
+                            bearing_from_px(cx, cy))
 
                 seq = (seq + 1) & 0xFFFFFFFF
-                if not accepted:
+                if not hits:
                     color, err, area, box, bearing = COL_NONE, 0, 0, None, None
                 else:
-                    color, err, area, box, bearing = describe(accepted[0])
+                    color, err, area, box, bearing = describe(hits[0])
                 # second sign: the next accepted blob that is not the first
                 # one split in two (same colour, bearing within SECOND_MIN_SEP_DEG)
                 s_color, s_area, s_box, s_bearing = COL_NONE, 0, None, None
-                for hit in accepted[1:]:
+                for hit in hits[1:]:
                     c2, _, a2, b2, br2 = describe(hit)
                     if (c2 == color and bearing is not None and br2 is not None
                             and abs(br2 - bearing) < SECOND_MIN_SEP_DEG):
@@ -496,18 +550,21 @@ class VisionThread(threading.Thread):
                     s_color, s_area, s_box, s_bearing = c2, a2, b2, br2
                     break
 
+                now = time.monotonic()
+                dt, t_prev = now - t_prev, now
+                if dt > 0:
+                    fps += 0.1 * (1.0 / dt - fps)
                 with lock:
                     vision.update(color=color, err=err, area=int(area),
-                                  seq=seq, t=time.monotonic(), box=box, bearing=bearing,
+                                  seq=seq, t=now, box=box, bearing=bearing,
                                   s_color=s_color, s_area=s_area, s_box=s_box,
-                                  s_bearing=s_bearing)
+                                  s_bearing=s_bearing, mode=mode, fps=fps,
+                                  infer_ms=self.yolo.infer_ms if mode.startswith("YOLO") else 0.0,
+                                  yolo_error=self.yolo_error)
                     if viewers > 0:
                         latest_frame = frame
-                        vision["cands"] = [
-                            ((int(bx * sx), int(by * sy), int((bx + bw) * sx), int((by + bh) * sy)),
-                             code, why)
-                            for (c, _, code, why) in cands
-                            for (bx, by, bw, bh) in [cv2.boundingRect(c)]]
+                        vision["cands"] = cands
+                        vision["dets"] = [(h[2], h[0], h[3]) for h in hits]
                         vision["floor"] = floor
                     else:
                         latest_frame = None
@@ -517,6 +574,48 @@ class VisionThread(threading.Thread):
             except Exception:
                 pass
             print("[vision] stopped")
+
+    def _find(self, frame, pf, sx, sy):
+        """(hits, cands, floor, mode). hits nearest first; cands = every box for
+        the overlay as (box, colour, reject_code_or_None)."""
+        det = self._detector()
+        if det is not None:
+            try:
+                found = det.detect(frame, conf=YOLO_CONF, iou=YOLO_IOU)
+            except Exception as e:                  # never lose the camera over it
+                if self.yolo_error is None:
+                    note(f"[vision] YOLO failed, colour masking this frame: {e}")
+                self.yolo_error = str(e)
+                found = None
+            if found is not None:
+                hits, cands = [], []
+                for d in found:
+                    box, code = d.box(), yolo_colour(d.name)
+                    if code is None:
+                        cands.append((box, code, "M"))       # not a sign class
+                    elif d.h < YOLO_MIN_BOX_H:
+                        cands.append((box, code, "H"))
+                    else:
+                        # box area in 320x240 px, the unit AREA_K and the
+                        # locate_pillar() sanity window were written for
+                        hits.append((code, d.w * d.h / (sx * sy), box, d.conf))
+                if pf["rank_by_height"]:                     # nearest = tallest
+                    hits.sort(key=lambda t: (-(t[2][3] - t[2][1]), -t[1]))
+                else:
+                    hits.sort(key=lambda t: -t[1])
+                return hits, cands, None, f"YOLO {det.backend}"
+
+        small = cv2.resize(frame, PROC_SIZE, interpolation=cv2.INTER_AREA)
+        hsv, lab = colour_spaces(small)
+        accepted, found_c, floor = find_pillars(hsv, lab, pf)
+
+        def box640(cnt):
+            x, y, w, h = cv2.boundingRect(cnt)
+            return (int(x * sx), int(y * sy), int((x + w) * sx), int((y + h) * sy))
+
+        hits = [(code, area, box640(c), 1.0) for (c, area, code) in accepted]
+        cands = [(box640(c), code, why) for (c, _, code, why) in found_c]
+        return hits, cands, floor, "Lab" if USE_LAB else "HSV"
 
 
 def vision_now(now):
@@ -862,7 +961,8 @@ td{padding:2px 14px 2px 0}td.k{color:var(--dim)}
     <label><input type=checkbox onchange="cam.src=this.checked?'/stream?view=floor':'/stream'">
     show floor mask</label>
     <div class=dim style="font-size:12px">grey boxes = rejected:
-      H too short &middot; A flat &middot; S ragged &middot; F not on mat &middot; C low contrast</div></div>
+      H too short &middot; A flat &middot; S ragged &middot; F not on mat &middot; C low contrast
+      &middot; M not a sign class (YOLO)</div></div>
   <div style="min-width:300px;flex:1">
     <div class=state id=state>&hellip;</div>
     <div class=big id=corner></div>
@@ -905,7 +1005,8 @@ async function cmd(c){await fetch('/api/'+c,{method:'POST'});}
 // ---- Tune ----
 const GROUPS={camera:'Camera',hsv:'HSV colour ranges',lab:'Lab colour ranges',
   filter:'Pillar filter (incl. LazyGo ROI / height)',
-  cone:'Wall cone fit',locate:'Pillar location',cand:'LiDAR candidates (LazyGo edges)',link:'Link'};
+  cone:'Wall cone fit',locate:'Pillar location',cand:'LiDAR candidates (LazyGo edges)',link:'Link',
+  yolo:'YOLO detector (models/pillars26)'};
 const SGROUPS=['Drive & heading','Colour trigger & turn','Lane planner','Passing a pillar',
   'Wall levelling','Reverse & re-plan','Corner exit','Safety','Link'];
 
@@ -973,6 +1074,8 @@ async function tick(){
     '<span class=bad>lidar STALE</span>'):'<span class=bad>STM32 port closed</span>';
   $('live').innerHTML=
    `${lk} <span class=dim>${r.hz.toFixed(0)} Hz</span><br>`+
+   `detector <b>${r.detector||'--'}</b> <span class=dim>${r.infer_ms?r.infer_ms+' ms, ':''}`+
+     `${r.vis_fps} fps</span>`+(r.yolo_error?` <span class=bad title="${r.yolo_error}">YOLO error</span>`:'')+`<br>`+
    `L ${f(r.left)} &nbsp;F ${f(r.front)} &nbsp;R ${f(r.right)} mm<br>`+
    `cone L ${f(r.cone_left)} &nbsp;R ${f(r.cone_right)} mm &nbsp;yaw ${r.wall_yaw===null?'--':r.wall_yaw+'°'}<br>`+
    `pillar <b>${r.name}</b> err ${r.error} area ${r.area}`+
@@ -986,7 +1089,8 @@ async function tick(){
     rows($('telLane'),[['cone left',f(r.cone_left)+' mm'],['cone right',f(r.cone_right)+' mm'],
       ['wall yaw',(r.wall_yaw===null?'--':r.wall_yaw+'°')],
       ['lane heading',r.lane||'--'],['corner',r.corner||'--'],['planned exit',r.exit||'--']]);
-    rows($('telVis'),[['colour',r.name],['err',r.error+' px'],['area',r.area],
+    rows($('telVis'),[['detector',r.detector||'--'],['inference',r.infer_ms+' ms'],
+      ['camera loop',r.vis_fps+' fps'],['colour',r.name],['err',r.error+' px'],['area',r.area],
       ['frame seq',r.vseq],
       ['pillar x,y',r.pillar_xy?r.pillar_xy.join(', ')+' mm':'--'],
       ['2nd pillar',r.second+(r.second_xy?' at '+r.second_xy.join(', ')+' mm':'')],
@@ -1020,6 +1124,8 @@ def status():
     return jsonify({
         "color": v["color"], "name": NAMES[v["color"]],      # 1=red, 0=green, 2=none
         "error": v["err"], "area": v["area"], "vseq": v["seq"],
+        "detector": v.get("mode", ""), "infer_ms": round(v.get("infer_ms", 0.0), 1),
+        "vis_fps": round(v.get("fps", 0.0), 1), "yolo_error": v.get("yolo_error"),
         "left": link["l"], "front": link["f"], "right": link["r"],
         "cone_left": link["cl"], "cone_right": link["cr"],
         "wall_yaw": None if link["yaw"] is None else round(link["yaw"], 1),
@@ -1135,12 +1241,21 @@ def mjpeg(view="camera"):
                     cv2.rectangle(bgr, (x0, y0), (x1, y1), (140, 140, 140), 1)
                     cv2.putText(bgr, why, (x0, max(12, y0 - 4)),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (140, 140, 140), 1)
+            for (x0, y0, x1, y1), code, conf in v.get("dets", []):
+                cv2.rectangle(bgr, (x0, y0), (x1, y1), BOX_BGR[code], 1)
+                if conf < 1.0:                               # YOLO: show the confidence
+                    cv2.putText(bgr, f"{conf:.2f}", (x0, max(12, y0 - 4)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.45, BOX_BGR[code], 1)
             if v["box"] is not None and v["color"] != COL_NONE:
                 col = BOX_BGR[v["color"]]
                 x0, y0, x1, y1 = v["box"]
                 cv2.rectangle(bgr, (x0, y0), (x1, y1), col, 2)
                 cv2.putText(bgr, f"c:{v['color']} err:{v['err']} area:{v['area']}",
                             (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, col, 2)
+            cv2.putText(bgr, f"{v.get('mode', '')}  {v.get('infer_ms', 0):.0f} ms  "
+                             f"{v.get('fps', 0):.0f} fps",
+                        (10, camera.FRAME_H - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                        (255, 255, 255), 1)
             ok, jpg = cv2.imencode(".jpg", bgr,
                                    [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
             if ok:
