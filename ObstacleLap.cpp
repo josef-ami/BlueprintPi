@@ -26,8 +26,8 @@
 //     distance window, confirmed over REACH_CONFIRM revs (stopped); a BACKOFF
 //     reverses a PLANNED distance in one go (see "REACH" below), never with
 //     the rear corner at a wall
-//   - tight pairs (opposite sides, < PAIR_TIGHT_MM apart) pass with
-//     PASS_MARGIN_TIGHT_MM on their rule lines; PASS_HOLD_MM 250 -> 30
+//   - the planner looks at ONE sign ahead only - the nearest - never at the
+//     one after it; PASS_HOLD_MM 250 -> 30
 //   - a PLAN_REVERSE corner approaches on the inner half (TURN_REV_INNER_MM):
 //     the reverse arc swings the car toward the old lane's outer wall
 //   All of it was run against a host simulation of the field (the real .ino
@@ -504,11 +504,6 @@ BlockColor classifyColor() {
                                              //   at 40 deg that is 98 mm, not 57
        float    PILLAR_HALF_MM    = 25.0;
        float    PASS_MARGIN_MM    = 150.0;   // air gap car side <-> sign face; v9: was 80 (clipped)
-       float    PASS_MARGIN_TIGHT_MM = 70.0; // v9: ... for a TIGHT PAIR: two consecutive signs passed on
-       float    PAIR_TIGHT_MM     = 1000.0;  //   opposite sides less than this apart along the lane. The
-                                             //   car has to cross the lane between them, and 2 x 150 mm
-                                             //   of extra swing does not fit in 600 mm (host sim: wrong
-                                             //   side). Both get the tight margin and hug their lines.
       float    PASS_CLEAR_MM     = 232.0;   // derived, see recomputeDerived()
        float    WALL_MARGIN_MM    = 45.0;
       float    LANE_LIMIT_MM     = 398.0;   // derived, see recomputeDerived()
@@ -570,7 +565,7 @@ BlockColor classifyColor() {
 //      confirms standing still, so it is not swerving deeper while it decides.
 //      The sign before this one (being passed, or passed and remembered) is
 //      part of the simulation: the car is held on its line until it is
-//      PASS_HOLD behind - that is what makes a tight pair hard.
+//      PASS_HOLD behind. Nothing beyond the nearest sign ahead is planned for.
 //   5. ACT, cheapest first: the gap-centre target fails but the rule line
 //      (the bound, PASS_MARGIN from the sign) passes -> aim at the bound for
 //      this sign ("hug"). Both fail -> BACKOFF by a PLANNED distance: the
@@ -613,7 +608,7 @@ BlockColor classifyColor() {
                                              //   the rear corner into the wall)
 
 struct PillarTrack { bool used; int color; float lat; float along; uint8_t hits; float lastSeen;
-                     float backedMm; bool hug; bool tight; bool passed; };
+                     float backedMm; bool hug; bool passed; };
 const int   MAX_TRACKS = 6;
 const float TRACK_KEEP_BEHIND_MM = 600.0f;  // v9: a passed sign is remembered this far behind, so
                                             //   a BACKOFF that reverses the car back beside it
@@ -765,7 +760,7 @@ void addSighting(const Sighting &s) {
   tracks[slot].used = true; tracks[slot].color = s.color;
   tracks[slot].lat = lat;   tracks[slot].along = at;
   tracks[slot].hits = 1;    tracks[slot].lastSeen = laneAlongMm; tracks[slot].backedMm = 0.0f;
-  tracks[slot].hug = false;  tracks[slot].tight = false; tracks[slot].passed = false;
+  tracks[slot].hug = false;  tracks[slot].passed = false;
 }
 
 // ---- REACH simulation (v9) ----
@@ -791,7 +786,7 @@ const float IMU_HZ            = 100.0f;    // SERVO_SLEW is per IMU update
 
 // holdS / holdTgt: for the first holdS mm the car is still bound to the sign
 // before this one (the planner aims at holdTgt until that sign is PASS_HOLD
-// behind), which is what makes a tight pair hard.
+// behind).
 float reachSim(float y0, float psi0Deg, float d0, float tgt, float rel, float plat, bool pr, float v,
                float holdS, float holdTgt) {
   const float ds   = REACH_SIM_STEP_MM;
@@ -826,18 +821,13 @@ float reachSim(float y0, float psi0Deg, float d0, float tgt, float rel, float pl
 // The two lateral targets for passing track t alone: the middle of the gap
 // between its face and the wall on its passing side (clamped to the rule
 // line), and the rule line itself (PASS_CLEAR from its centre).
-float passClear(const PillarTrack &t) {
-  return t.tight ? PILLAR_HALF_MM + CAR_HALF_W_MM + PASS_MARGIN_TIGHT_MM : PASS_CLEAR_MM;
-}
-
 void passTargets(const PillarTrack &t, float &gap, float &bound) {
   bool pr = passRight(t.color);
-  bound = pr ? t.lat - passClear(t) : t.lat + passClear(t);
+  bound = pr ? t.lat - PASS_CLEAR_MM : t.lat + PASS_CLEAR_MM;
   float mid = pr ? 0.5f * ((t.lat - PILLAR_HALF_MM) + wallLatRight())
                  : 0.5f * ((t.lat + PILLAR_HALF_MM) + wallLatLeft());
   gap = GAP_CENTRE_W * mid;
   gap = pr ? fminf(gap, bound) : fmaxf(gap, bound);
-  if (t.tight) gap = bound;                     // a tight pair: no extra swing
   gap   = constrain(gap,   -LANE_LIMIT_MM, LANE_LIMIT_MM);
   bound = constrain(bound, -LANE_LIMIT_MM, LANE_LIMIT_MM);
 }
@@ -856,7 +846,7 @@ float reachFrom(const PillarTrack &t, float tgt, float back) {
   if (prev >= 0) {
     holdS = tracks[prev].along + PASS_HOLD_MM - laneAlongMm + back;
     float g; passTargets(tracks[prev], g, holdTgt);
-    if (!tracks[prev].hug && !tracks[prev].tight) holdTgt = g;
+    if (!tracks[prev].hug) holdTgt = g;
   }
   float psi  = wrapDeg(gHeading - laneHeading);
   float y    = laneOffMm;
@@ -1006,25 +996,6 @@ void updatePlanner() {
     if (rel > 0 && rel < nearestAhead) { nearestAhead = rel; nearestIdx = i; }
   }
 
-  // TIGHT PAIRS: consecutive confirmed signs (by lane position) passed on
-  // opposite sides, closer than PAIR_TIGHT_MM - both hug, with the tight margin.
-  // Sticky per track: decided once, never undone mid-pass.
-  for (int i = 0; i < MAX_TRACKS; i++) {
-    if (!trackConfirmed(i)) continue;
-    int nx = -1;
-    for (int j = 0; j < MAX_TRACKS; j++)
-      if (j != i && trackConfirmed(j) && tracks[j].along > tracks[i].along &&
-          (nx < 0 || tracks[j].along < tracks[nx].along)) nx = j;
-    if (nx < 0 || passRight(tracks[i].color) == passRight(tracks[nx].color)) continue;
-    if (tracks[nx].along - tracks[i].along >= PAIR_TIGHT_MM) continue;
-    if (!tracks[i].tight || !tracks[nx].tight) {
-      tracks[i].tight = tracks[nx].tight = true;
-      Serial.print(F("# PAIR tight ")); Serial.print(colName(tracks[i].color));
-      Serial.print(F(" -> ")); Serial.print(colName(tracks[nx].color));
-      Serial.print(F(" gap=")); Serial.println((int)(tracks[nx].along - tracks[i].along));
-    }
-  }
-
   float lo = -LANE_LIMIT_MM, hi = LANE_LIMIT_MM;
   float urgentRel = 1e9, urgentBound = 0; int urgentIdx = -1; bool any = false, beside = false;
   for (int i = 0; i < MAX_TRACKS; i++) {
@@ -1035,8 +1006,8 @@ void updatePlanner() {
     if (fabs(rel) <= alongsideMm()) beside = true;       // (a passed sign no longer caps the yaw:
                                                          //   host sim, the late swing hit the next one)
     float bound;
-    if (passRight(tracks[i].color)) { bound = tracks[i].lat - passClear(tracks[i]); if (bound < hi) hi = bound; }
-    else                            { bound = tracks[i].lat + passClear(tracks[i]); if (bound > lo) lo = bound; }
+    if (passRight(tracks[i].color)) { bound = tracks[i].lat - PASS_CLEAR_MM; if (bound < hi) hi = bound; }
+    else                            { bound = tracks[i].lat + PASS_CLEAR_MM; if (bound > lo) lo = bound; }
     if (rel < urgentRel) { urgentRel = rel; urgentBound = bound; urgentIdx = i; }
   }
   passActive = any;
@@ -1883,8 +1854,6 @@ const ParamDesc PARAMS[] = {
   PF(CAR_HALF_LEN_MM,       G_PLAN,   20,   300),
   PF(PILLAR_HALF_MM,        G_PLAN,    5,   100),
   PF(PASS_MARGIN_MM,        G_PLAN,    0,   300),
-  PF(PASS_MARGIN_TIGHT_MM,  G_PLAN,    0,   300),
-  PF(PAIR_TIGHT_MM,         G_PLAN,    0,  3000),
   PF(WALL_MARGIN_MM,        G_PLAN,    0,   300),
   PF(GAP_CENTRE_W,          G_PLAN,    0,     1),
   PF(CENTRE_AIM_MM,         G_PLAN,  100,  2000),
