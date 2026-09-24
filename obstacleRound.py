@@ -41,7 +41,7 @@ Wire frame - one ASCII line per send, SEND_HZ times a second, 18 fields:
   rev               lidar revolution counter                     (as openRound)
   color             first sign: 1 = red, 0 = green, 2 = none
   err               first sign centre x - 320, 640-px frame, + = right (debug;
-                    the slot a rear ToF will use later)
+                    the rear ToF is on the STM32 now, mux CH4 - not in the frame)
   area              first sign blob area, 320x240 detection pixels (debug)
   vseq              camera frame counter (debug)
   coneL / coneR     perpendicular mm to the left / right wall, line-fitted
@@ -58,6 +58,9 @@ Wire frame - one ASCII line per send, SEND_HZ times a second, 18 fields:
 
 Commands on the same serial line:
     S            START            X            STOP
+    (firmware v10: START first drives the car out of the parking lot -
+     PARK OUT, pivot / exit / reverse arc - then the 3 laps. Tune tab,
+     "Park out": PARK_OUT_ENABLE = 0 starts the laps at once, as before.)
     N <name> <v> set a firmware parameter       ?P  dump the table
     ?V           firmware version / boot id
 Replies from the firmware start with '!' (parameters) or '#' (log).
@@ -855,7 +858,15 @@ def track_stm32(line):
     if s.startswith("WAIT_START"):
         stm_state["state"], stm_state["corner"] = "ARMED - press START", ""
     elif s.startswith("START refused"):
-        stm_state["state"] = "START refused (lidar stale)"
+        stm_state["state"] = s                       # "START refused: lidar stale / IMU has no heading"
+    elif s.startswith("PARK OUT start"):
+        stm_state.update(state="PARK OUT", corner="", exit="")
+    elif s.startswith(("PIVOT", "EXIT", "REALIGN")) and stm_state["state"].startswith("PARK OUT"):
+        stm_state["state"] = "PARK OUT - " + s.split(":")[0].split()[0]
+    elif s.startswith("PARK OUT ABORT"):
+        stm_state["state"] = s.replace("PARK OUT ABORT", "PARK OUT ABORTED")
+    elif s.startswith("PARK OUT DONE"):
+        stm_state["state"] = "RUNNING"
     elif s.startswith("GO"):
         stm_state.update(state="RUNNING", corner="0/12", exit="")
     elif s.startswith("TURN "):
@@ -875,7 +886,7 @@ def track_stm32(line):
     elif s.startswith("STOP from Pi"):
         stm_state["state"] = "STOPPED"
     elif s.startswith("FINISHED"):
-        if stm_state["state"] != "STOPPED":
+        if stm_state["state"] != "STOPPED" and not stm_state["state"].startswith("PARK OUT ABORTED"):
             stm_state["state"] = "FINISHED"
     elif s.startswith("first Pi frame"):
         stm_state["state"] = "connected"
@@ -985,7 +996,7 @@ const GROUPS={camera:'Camera',hsv:'HSV colour ranges',lab:'Lab colour ranges',
   cone:'Wall cone fit',locate:'Pillar location',cand:'LiDAR candidates (LazyGo edges)',link:'Link',
   yolo:'YOLO detector (models/pillars26)'};
 const SGROUPS=['Drive & heading','Colour trigger & turn','Lane planner','Passing a pillar',
-  'Wall levelling','Reverse & re-plan','Corner exit','Safety','Link'];
+  'Wall levelling','Reverse & re-plan','Corner exit','Safety','Link','Park out'];
 
 function field(p,side){
   const id=side+':'+p.name, d=document.createElement('div'); d.className='p';
