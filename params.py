@@ -516,6 +516,9 @@ STM_OLD_DEFAULTS = {
     "PASS_HOLD_MM": 250.0,         # -> 30
     "BACKOFF_MAX_MM": 250.0,       # -> 300
     "BACKOFF_MARGIN_MM": 60.0,     # -> 30, now a simulated clearance
+    # firmware v9.2 (measured on the car)
+    "CAR_HALF_LEN_MM": 85.0,       # -> 60
+    "REACH_SPEED_MMPS": 400.0,     # -> 200
 }
 
 

@@ -498,10 +498,9 @@ BlockColor classifyColor() {
 // before the sign, which the IMU heading PID tracks.
        float    CORRIDOR_MM       = 1000.0;
        float    CAR_HALF_W_MM     = 57.0;
-       float    CAR_HALF_LEN_MM   = 85.0;    // v9: LiDAR to the far end of the body (measure it!).
-                                             //   A car yawed psi sweeps a band
-                                             //   W cos(psi) + L sin(psi) wide each side, not W:
-                                             //   at 40 deg that is 98 mm, not 57
+       float    CAR_HALF_LEN_MM   = 60.0;    // LiDAR to the far end of the body (measured: 60).
+                                             //   The REACH simulation and the # PASS log treat
+                                             //   the car as a 2 L x 2 W rectangle, yawed
        float    PILLAR_HALF_MM    = 25.0;
        float    PASS_MARGIN_MM    = 150.0;   // air gap car side <-> sign face; v9: was 80 (clipped)
       float    PASS_CLEAR_MM     = 232.0;   // derived, see recomputeDerived()
@@ -552,10 +551,10 @@ BlockColor classifyColor() {
 //   1. SIMULATE the real loop: 10 mm steps of the same aim law, the same
 //      yaw caps, the same PID and slew (at the measured speed, never below
 //      REACH_SPEED_MMPS) and the servo -> curvature of TURN_RADIUS_MM.
-//   2. JUDGE the swept outline, not the centre: over the whole stretch where
-//      the body overlaps the sign along the lane, the side of the car toward
-//      the sign (W cos psi + L sin psi) must stay REACH_SAFETY_MM outside the
-//      sign's face. Result: the smallest clearance, mm (< 0 = contact).
+//   2. JUDGE the body, not the centre: at every step the car is a rectangle
+//      (CAR_HALF_LEN x CAR_HALF_W about the LiDAR) yawed psi, and its air to
+//      the sign (bodyAir) must stay above REACH_SAFETY_MM. Result: the
+//      smallest clearance, mm (< 0 = contact, or the wrong side).
 //   3. DECIDE rarely and only where the answer is good: once per new LiDAR
 //      revolution, only for the nearest sign, only while it is between
 //      REACH_DECIDE_NEAR_MM and REACH_DECIDE_FAR_MM ahead, only once it has
@@ -578,7 +577,8 @@ BlockColor classifyColor() {
        float    REACH_DECIDE_FAR_MM  = 900.0;  // farther than this: the track is too rough to judge
        uint8_t  REACH_MIN_HITS       = 3;      // sightings before a sign is judged
        uint8_t  REACH_CONFIRM        = 3;      // failing revolutions in a row before acting
-       float    REACH_SPEED_MMPS     = 400.0;  // slowest speed the simulation assumes
+       float    REACH_SPEED_MMPS     = 200.0;  // slowest speed the simulation assumes (measured
+                                               //   cruise at DRIVE_PWM 60: 200 mm/s)
        unsigned long REACH_PAUSE_MS  = 700;    // on the FIRST failing revolution the car stops and
                                                //   confirms standing still (host sim: while it kept
                                                //   driving, the swerve toward the sign yawed it 20-30
@@ -608,7 +608,8 @@ BlockColor classifyColor() {
                                              //   the rear corner into the wall)
 
 struct PillarTrack { bool used; int color; float lat; float along; uint8_t hits; float lastSeen;
-                     float backedMm; bool hug; bool passed; };
+                     float backedMm; bool hug; bool passed;
+                     float predClr; float predRel; float minClr; };   // calibration log (# PASS)
 const int   MAX_TRACKS = 6;
 const float TRACK_KEEP_BEHIND_MM = 600.0f;  // v9: a passed sign is remembered this far behind, so
                                             //   a BACKOFF that reverses the car back beside it
@@ -761,11 +762,10 @@ void addSighting(const Sighting &s) {
   tracks[slot].lat = lat;   tracks[slot].along = at;
   tracks[slot].hits = 1;    tracks[slot].lastSeen = laneAlongMm; tracks[slot].backedMm = 0.0f;
   tracks[slot].hug = false;  tracks[slot].passed = false;
+  tracks[slot].predClr = 1e9f; tracks[slot].predRel = 0.0f; tracks[slot].minClr = 1e9f;
 }
 
 // ---- REACH simulation (v9) ----
-// Half-width of the band the body sweeps toward one side at yaw psi (rad).
-float sweptHalfW(float psi) { return CAR_HALF_W_MM * cosf(psi) + CAR_HALF_LEN_MM * fabsf(sinf(psi)); }
 
 // The aim distance the planner uses with a sign `togo` mm ahead (< 0 = passed).
 float passAimMm(float togo) {
@@ -774,6 +774,30 @@ float passAimMm(float togo) {
 
 // Along-lane half-length of "the body is beside the sign".
 float alongsideMm() { return CAR_HALF_LEN_MM + PILLAR_HALF_MM; }
+
+// Air (mm) between the car's body - a rectangle CAR_HALF_LEN x CAR_HALF_W
+// about the LiDAR, yawed psi (rad, + left) - and a sign `togo` mm ahead along
+// the lane and `dy` mm to the left (sign minus car, lane frame), the sign taken
+// as a circle of PILLAR_HALF_MM. Negative = contact, or the car on the WRONG
+// side of it (pr = the sign must be passed on its right = be on the car's left).
+// v9.1: replaces the swept band W cos + L sin, which assumed the corner that
+// sticks out was beside the sign over the whole pass (~40-60 mm pessimistic).
+float bodyAir(float togo, float dy, float psi, bool pr) {
+  const float R = PILLAR_HALF_MM;
+  float c = cosf(psi), sn = sinf(psi);
+  float px =  togo * c + dy * sn;                 // sign centre in the car frame
+  float py = -togo * sn + dy * c;                 //   (x forward, y left)
+  float side = pr ? py : -py;                     // + = the sign is on its correct side
+  float ex = fabsf(px) - CAR_HALF_LEN_MM;         // > 0: ahead of / behind the body
+  if (side >= 0.0f) {
+    float ey = side - CAR_HALF_W_MM;
+    if (ex <= 0.0f && ey <= 0.0f) return fmaxf(ex, ey) - R;        // inside the body
+    return sqrtf(fmaxf(ex, 0.0f) * fmaxf(ex, 0.0f) + fmaxf(ey, 0.0f) * fmaxf(ey, 0.0f)) - R;
+  }
+  if (ex <= R) return side - CAR_HALF_W_MM - R;   // beside it on the WRONG side
+  float ey = fmaxf(0.0f, -side - CAR_HALF_W_MM);  // not beside yet: plain distance
+  return sqrtf(ex * ex + ey * ey) - R;
+}
 
 // Drive the real steering loop forward, in the lane frame, toward lateral
 // target `tgt` for a sign `rel` mm ahead at lateral `plat`, passed on its
@@ -794,10 +818,12 @@ float reachSim(float y0, float psi0Deg, float d0, float tgt, float rel, float pl
   const float travL = SERVO_TRUE_STRAIGHT - SERVO_MAX_LEFT;     // + offsets
   const float travR = SERVO_MAX_RIGHT - SERVO_TRUE_STRAIGHT;    // - offsets
   const float win  = alongsideMm();
-  const float line = pr ? plat - PILLAR_HALF_MM - REACH_SAFETY_MM
-                        : plat + PILLAR_HALF_MM + REACH_SAFETY_MM;
+  const float near = CAR_HALF_LEN_MM + CAR_HALF_W_MM + PILLAR_HALF_MM;   // body can touch within this
   float y = y0, psi = psi0Deg * DEG_TO_RAD, d = d0, worst = 1e9f;
-  for (float s = 0.0f; s <= rel + win; s += ds) {
+  // ds is PATH length: the car covers ds cos(psi) along the lane and ds sin(psi)
+  // across it (v9.1 fix: stepping s by ds counted a 40 deg swerve 30% too far
+  // along the lane, so the sideways reach came out ~25% short)
+  for (float s = 0.0f; s <= rel + near; s += ds * fmaxf(cosf(psi), 0.2f)) {
     float togo = rel - s;
     float ymax = (fabsf(togo) <= win) ? fminf(ALONGSIDE_YAW_MAX, PASS_YAW_MAX) : PASS_YAW_MAX;
     bool  held = s < holdS;
@@ -810,8 +836,8 @@ float reachSim(float y0, float psi0Deg, float d0, float tgt, float rel, float pl
     float k = (d >= 0.0f ? d / travL : d / travR) / TURN_RADIUS_MM;   // 1/mm, + = left
     psi += k * ds;
     y   += ds * sinf(psi);
-    if (fabsf(togo) <= win) {
-      float m = pr ? line - (y + sweptHalfW(psi)) : (y - sweptHalfW(psi)) - line;
+    if (fabsf(togo) <= near) {
+      float m = bodyAir(togo, plat - y, psi, pr) - REACH_SAFETY_MM;
       if (m < worst) worst = m;
     }
   }
@@ -912,6 +938,7 @@ void reachDecide(int k, float rel) {
   passTargets(t, gap, bound);
   float clr = reachFrom(t, t.hug ? bound : gap, 0.0f);
   reachClearMm = clr;
+  if (t.predClr >= 1e8f) { t.predClr = clr; t.predRel = rel; }   // first verdict, for # PASS
   if (clr >= 0.0f) { reachBad = 0; reachPause = false; return; }
   if (++reachBad < REACH_CONFIRM) {
     if (reachBad == 1 && REACH_PAUSE_MS > 0) {
@@ -982,9 +1009,26 @@ void updatePlanner() {
     if (!tracks[i].used) continue;
     float rel = tracks[i].along - laneAlongMm;
     if (rel < -TRACK_KEEP_BEHIND_MM) { tracks[i].used = false; continue; }   // long gone
+    if (tracks[i].hits >= TRACK_CONFIRM && laneOffOk &&
+        fabs(rel) <= CAR_HALF_LEN_MM + CAR_HALF_W_MM + PILLAR_HALF_MM) {
+      // calibration: the air the body actually had to this sign, by the same
+      // geometry the REACH simulation judges (without its safety margin)
+      float psi = wrapDeg(gHeading - laneHeading) * DEG_TO_RAD;
+      float air = bodyAir(rel, tracks[i].lat - laneOffMm, psi, passRight(tracks[i].color));
+      if (air < tracks[i].minClr) tracks[i].minClr = air;
+    }
     if (rel < -PASS_HOLD_MM) {                                               // passed: out of play,
-      if (!tracks[i].passed && tracks[i].hits >= TRACK_CONFIRM)              //   but remembered
+      if (!tracks[i].passed && tracks[i].hits >= TRACK_CONFIRM) {            //   but remembered
         lastPassedColor = tracks[i].color;
+        if (tracks[i].minClr < 1e8f) {
+          // # PASS: predicted air (first REACH verdict + REACH_SAFETY_MM) vs actual
+          Serial.print(F("# PASS ")); Serial.print(colName(tracks[i].color));
+          if (tracks[i].predClr >= 1e8f) Serial.print(F(" predicted=none"));
+          else { Serial.print(F(" predicted=")); Serial.print((int)(tracks[i].predClr + REACH_SAFETY_MM));
+                 Serial.print(F(" at rel=")); Serial.print((int)tracks[i].predRel); }
+          Serial.print(F(" actual=")); Serial.println((int)tracks[i].minClr);
+        }
+      }
       tracks[i].passed = true;
       continue;
     }
