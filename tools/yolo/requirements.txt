@@ -1,0 +1,6 @@
+# PC side of the YOLO retrain loop (tools/yolo/yolo.py)
+numpy
+opencv-python
+onnxruntime
+# optional: automatic upload to Roboflow (yolo.py upload / harvest)
+roboflow

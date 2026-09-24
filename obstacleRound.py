@@ -82,6 +82,30 @@ PILLAR DETECTION: YOLO FIRST, COLOUR MASKING AS THE FALLBACK
   with SWAP_RB on: keep it on, or red and blue swap and the model sees nonsense.
   The Run tab shows which detector is live and its time per frame.
 
+RECORDING (training images for a YOLO detector) - see tools/yolo/PROTOCOL.md
+  With RECORD_RUNS on (Tune tab, "Recording"; OFF by default so a competition
+  run never fills the SD card), every run is saved to take/ next to this file,
+  one folder per run:
+
+      take/run_20260923_141502/run_20260923_141502_00000.jpg ...
+      take/run_20260923_141502/frames.csv     time, state, corner, lidar front, colour
+
+  Recording starts when the STM32 logs "# GO" and stops at "# FINISHED" or a
+  STOP. The Record button on the Run tab saves frames the same way without a
+  run (push the car around the mat by hand - the fastest way to get every
+  angle). The frames are the RAW camera image, exactly what the detector sees.
+  A frame that is nearly identical to the last saved one (car standing still)
+  is skipped (RECORD_MIN_CHANGE). Saving runs on its own thread and drops
+  frames rather than ever slowing the camera. The PC pulls them with
+  `python tools/yolo/yolo.py pull`.
+
+WHICH MODEL (models/ACTIVE)
+  models/ACTIVE holds the name of the folder under models/ to load (default
+  pillars26). `tools/yolo/yolo.py deploy` copies a new model to the Pi and
+  rewrites ACTIVE; the vision thread notices within 2 s and reloads - no
+  restart. Classes are matched by NAME: any class with RED / GREEN in its name
+  is a sign; anything else (PARKING LOT) is drawn on the page, never steered by.
+
 A NOTE ON THE CAMERA MODEL
   config.json disagrees with itself: camera_intrinsics.K has fx = 383 px/rad,
   which on a 640 px frame is +/-48 deg, while hfov_deg says 160 (+/-80), a
@@ -93,8 +117,11 @@ A NOTE ON THE CAMERA MODEL
 """
 
 import collections
+import csv
 import math
+import os
 import queue
+import shutil
 import threading
 import time
 
@@ -110,7 +137,23 @@ from sensors.lidar import LidarThread
 from openRound import UART_PORT, UART_BAUD, load_tol, read_three, lidar_live, _u16
 
 import params as prm
-from sensors.yolo_detector import YoloDetector, DEFAULT_MODEL_DIR as YOLO_MODEL_DIR
+from sensors.yolo_detector import YoloDetector, DEFAULT_MODEL_DIR
+
+MODELS_DIR = os.path.dirname(DEFAULT_MODEL_DIR)
+ACTIVE_FILE = os.path.join(MODELS_DIR, "ACTIVE")
+
+
+def active_model_dir():
+    """models/<name> named in models/ACTIVE, else the default (pillars26)."""
+    try:
+        with open(ACTIVE_FILE) as f:
+            name = f.read().strip()
+        d = os.path.join(MODELS_DIR, name)
+        if name and os.path.isdir(d):
+            return d
+    except OSError:
+        pass
+    return DEFAULT_MODEL_DIR
 
 # ---------------- fixed, not tunable ----------------
 PROC_SIZE   = (320, 240)     # detection resolution
@@ -145,7 +188,7 @@ PI = prm.PiParams(prm.PI_SPECS)
 STM = prm.StmParams()
 
 _MIRRORED = [s.name for s in prm.PI_SPECS
-             if s.group in ("camera", "cone", "locate", "cand", "link", "lab", "yolo")]
+             if s.group in ("camera", "cone", "locate", "cand", "link", "lab", "yolo", "record")]
 
 # defaults, so the names exist before the first sync
 MIN_AREA_PROC = 250
@@ -186,6 +229,12 @@ YOLO_CONF = 0.5
 YOLO_IOU = 0.5
 YOLO_MIN_BOX_H = 0
 YOLO_BACKENDS = ("auto", "ncnn", "openvino", "onnx")      # YOLO_BACKEND index
+
+RECORD_RUNS = False
+RECORD_HZ = 3.0
+RECORD_MIN_CHANGE = 3.0
+RECORD_JPEG_Q = 92
+RECORD_MIN_FREE_MB = 500
 
 USE_LAB = False
 FLOOR_L_MIN = 120
@@ -228,6 +277,182 @@ commands = queue.Queue()                          # written to serial by the mai
 def note(msg):
     print(msg)
     stm_log.append(msg)
+
+
+# --------------------------------------------------------------------------
+# recorder - raw camera frames to take/<session>/ for training a detector
+# --------------------------------------------------------------------------
+#
+# The vision thread calls offer() once per camera frame. offer() only checks
+# the rate and hands the frame REFERENCE to a small queue (grab_rgb() returns a
+# fresh array every frame and nothing writes to it afterwards, so no copy is
+# needed). This thread does the JPEG encode and the SD-card write. If the card
+# is slow the queue fills and frames are DROPPED and counted - the camera, and
+# with it the 50 Hz feed to the STM32, never waits on the disk.
+#
+# A session starts on "# GO" from the STM32 (or the Record button) and ends on
+# "# FINISHED" / "# STOP from Pi" (or the button again). Each session is its
+# own folder, and every file name carries the folder name, so images from
+# many runs can be merged into one training set without name clashes.
+
+TAKE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "take")
+
+
+class FrameRecorder(threading.Thread):
+
+    def __init__(self):
+        super().__init__(name="Recorder", daemon=True)
+        self._q = queue.Queue(maxsize=8)
+        self._halt = threading.Event()   # NOT _stop: that name is taken by Thread
+        self._lock = threading.Lock()
+        self.run_active = False          # between "# GO" and "# FINISHED"/"# STOP"
+        self.manual = False              # the page's Record button
+        self.session = 0                 # bumped on every start; the writer
+        self._kind = "run"               #   opens a new folder when it changes
+        self.folder = ""                 # current folder name, for the page
+        self.saved = 0                   # frames written in the current session
+        self.dropped = 0                 # frames lost to a full queue (slow SD)
+        self.skipped = 0                 # near-duplicates not saved (car standing still)
+        self.error = None
+        self._last_offer = 0.0
+
+    # ---- control, from the serial loop and the web page ----
+
+    def _begin(self, kind):
+        with self._lock:
+            self.session += 1
+            self._kind = kind
+            self.error = None
+            self.folder, self.saved = "", 0   # the writer fills these on the first frame
+            self._last_offer = 0.0
+
+    def start_run(self):
+        """'# GO' seen. Honours RECORD_RUNS; the button keeps its own session."""
+        if not RECORD_RUNS or self.manual:
+            return
+        self._begin("run")
+        self.run_active = True
+
+    def _stopped_note(self):
+        note(f"[pi] recording stopped: {self.saved} frames in take/{self.folder}"
+             if self.folder else "[pi] recording stopped: no frames saved")
+
+    def end_run(self):
+        if self.run_active:
+            self.run_active = False
+            self._stopped_note()
+
+    def set_manual(self, on):
+        on = bool(on)
+        if on and not self.manual:
+            self.run_active = False          # the button's session replaces a run's
+            self._begin("manual")
+            self.manual = True
+            note("[pi] recording (Record button)")
+        elif not on and self.manual:
+            self.manual = False
+            self._stopped_note()
+
+    def recording(self):
+        return self.run_active or self.manual
+
+    def status(self):
+        return {"on": self.recording(), "manual": self.manual, "folder": self.folder,
+                "saved": self.saved, "dropped": self.dropped, "skipped": self.skipped,
+                "error": self.error}
+
+    # ---- from the vision thread, once per camera frame ----
+
+    def offer(self, frame):
+        if not self.recording():
+            return
+        now = time.monotonic()
+        if now - self._last_offer < 1.0 / max(0.1, float(RECORD_HZ)):
+            return
+        self._last_offer = now
+        meta = (time.strftime("%H:%M:%S") + f".{int(time.time() * 1000) % 1000:03d}",
+                stm_state["state"], stm_state["corner"],
+                "" if link["f"] is None else int(link["f"]),
+                NAMES.get(vision.get("color", COL_NONE), "none"))
+        try:
+            self._q.put_nowait((self.session, self._kind, frame, meta))
+        except queue.Full:
+            self.dropped += 1
+
+    # ---- the writer ----
+
+    def stop(self):
+        self._halt.set()
+
+    def run(self):
+        cur, path, fh, writer = None, None, None, None
+        last_thumb = None
+        try:
+            while not self._halt.is_set():
+                try:
+                    sess, kind, frame, meta = self._q.get(timeout=0.5)
+                except queue.Empty:
+                    if fh is not None and not self.recording():
+                        fh.close()
+                        fh = writer = None
+                    continue
+                if sess != self.session:
+                    continue                             # left over from an ended session
+                try:
+                    if sess != cur or fh is None:
+                        if fh is not None:
+                            fh.close()
+                        name = f"{kind}_{time.strftime('%Y%m%d_%H%M%S')}"
+                        if os.path.exists(os.path.join(TAKE_DIR, name)):
+                            name += f"_{sess}"           # two sessions in one second
+                        path = os.path.join(TAKE_DIR, name)
+                        os.makedirs(path, exist_ok=True)
+                        fh = open(os.path.join(path, "frames.csv"), "a", newline="")
+                        writer = csv.writer(fh)
+                        if fh.tell() == 0:
+                            writer.writerow(["file", "time", "state", "corner",
+                                             "front_mm", "colour_seen"])
+                        cur = sess
+                        last_thumb = None
+                        self.folder, self.saved, self.skipped = name, 0, 0
+                        note(f"[pi] recording to take/{name}")
+
+                    free_mb = shutil.disk_usage(path).free / 1e6
+                    if free_mb < RECORD_MIN_FREE_MB:
+                        if self.error is None:
+                            self.error = f"SD card nearly full ({free_mb:.0f} MB free)"
+                            note(f"[pi] recording paused: {self.error}")
+                        continue
+
+                    # a frame almost the same as the last one saved adds nothing
+                    # to a training set (car parked, waiting at the start)
+                    thumb = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY), (32, 24),
+                                       interpolation=cv2.INTER_AREA).astype(np.int16)
+                    if (last_thumb is not None and RECORD_MIN_CHANGE > 0 and
+                            float(np.abs(thumb - last_thumb).mean()) < RECORD_MIN_CHANGE):
+                        self.skipped += 1
+                        continue
+                    last_thumb = thumb
+
+                    fname = f"{self.folder}_{self.saved:05d}.jpg"
+                    bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                    if not cv2.imwrite(os.path.join(path, fname), bgr,
+                                       [int(cv2.IMWRITE_JPEG_QUALITY), int(RECORD_JPEG_Q)]):
+                        raise OSError(f"could not write {fname}")
+                    writer.writerow([fname, *meta])
+                    self.saved += 1
+                    if self.saved % 25 == 0:
+                        fh.flush()                       # a power cut loses < 25 rows
+                except OSError as e:
+                    if self.error is None:
+                        note(f"[pi] recording error: {e}")
+                    self.error = str(e)
+        finally:
+            if fh is not None:
+                fh.close()
+
+
+RECORDER = FrameRecorder()
 
 
 # --------------------------------------------------------------------------
@@ -478,6 +703,8 @@ class VisionThread(threading.Thread):
         self.yolo = None
         self.yolo_error = None
         self._yolo_key = None
+        self._model_dir = active_model_dir()
+        self._model_check = 0.0
 
     def stop(self):
         self._halt.set()
@@ -488,14 +715,20 @@ class VisionThread(threading.Thread):
         if not USE_YOLO:
             self._yolo_key, self.yolo = None, None
             return None
-        key = (YOLO_BACKENDS[max(0, min(3, int(YOLO_BACKEND)))], int(YOLO_THREADS))
+        now = time.monotonic()
+        if now - self._model_check > 2.0:                 # models/ACTIVE changed?
+            self._model_check = now
+            self._model_dir = active_model_dir()
+        key = (YOLO_BACKENDS[max(0, min(3, int(YOLO_BACKEND)))], int(YOLO_THREADS),
+               self._model_dir)
         if key != self._yolo_key:
             self._yolo_key, self.yolo = key, None
             try:
-                self.yolo = YoloDetector(YOLO_MODEL_DIR, backend=key[0], threads=key[1])
+                self.yolo = YoloDetector(key[2], backend=key[0], threads=key[1])
                 self.yolo_error = None
-                note(f"[vision] YOLO on {self.yolo.backend} ({key[1]} threads, "
-                     f"{self.yolo.imgsz} px): {', '.join(self.yolo.names.values())}")
+                note(f"[vision] YOLO {os.path.basename(key[2])} on {self.yolo.backend} "
+                     f"({key[1]} threads, {self.yolo.imgsz} px): "
+                     f"{', '.join(self.yolo.names.values())}")
             except Exception as e:
                 self.yolo_error = str(e)
                 note(f"[vision] YOLO unavailable, using colour masking: {e}")
@@ -519,6 +752,7 @@ class VisionThread(threading.Thread):
             while not self._halt.is_set():
                 pf = PILLAR_FILTER                        # one read, one frame
                 frame = camera.grab_rgb(cam, SWAP_RB)
+                RECORDER.offer(frame)                     # raw frame, no overlay
 
                 # hits: (colour, area in 320x240 px, box in 640x480 px, confidence)
                 hits, cands, floor, mode = self._find(frame, pf, sx, sy)
@@ -575,8 +809,9 @@ class VisionThread(threading.Thread):
                 hits, cands = [], []
                 for d in found:
                     box, code = d.box(), yolo_colour(d.name)
-                    if code is None:
-                        cands.append((box, code, "M"))       # not a sign class
+                    if code is None:                         # not a sign class:
+                        tag = "LOT" if "PARK" in d.name.upper() else "M"   # shown, never steered by
+                        cands.append((box, code, f"{tag} {d.conf:.2f}"))
                     elif d.h < YOLO_MIN_BOX_H:
                         cands.append((box, code, "H"))
                     else:
@@ -584,7 +819,7 @@ class VisionThread(threading.Thread):
                         # locate_pillar() sanity window were written for
                         hits.append((code, d.w * d.h / (sx * sy), box, d.conf))
                 hits.sort(key=lambda t: -t[1])              # largest blob first
-                return hits, cands, None, f"YOLO {det.backend}"
+                return hits, cands, None, f"YOLO {det.backend} {os.path.basename(det.model_dir)}"
 
         small = cv2.resize(frame, PROC_SIZE, interpolation=cv2.INTER_AREA)
         hsv, lab = colour_spaces(small)
@@ -869,6 +1104,7 @@ def track_stm32(line):
         stm_state["state"] = "RUNNING"
     elif s.startswith("GO"):
         stm_state.update(state="RUNNING", corner="0/12", exit="")
+        RECORDER.start_run()
     elif s.startswith("TURN "):
         stm_state["corner"] = s.split()[1]
     elif s.startswith("next straight"):
@@ -883,11 +1119,13 @@ def track_stm32(line):
         stm_state["state"] = "RUNNING"
     elif s.startswith("FINAL_STRAIGHT"):
         stm_state["state"] = "FINAL STRAIGHT"
-    elif s.startswith("STOP from Pi"):
+    elif s.startswith("STOP from Pi") or s.startswith("STOP from button"):
         stm_state["state"] = "STOPPED"
+        RECORDER.end_run()
     elif s.startswith("FINISHED"):
         if stm_state["state"] != "STOPPED" and not stm_state["state"].startswith("PARK OUT ABORTED"):
             stm_state["state"] = "FINISHED"
+        RECORDER.end_run()
     elif s.startswith("first Pi frame"):
         stm_state["state"] = "connected"
 
@@ -956,6 +1194,8 @@ td{padding:2px 14px 2px 0}td.k{color:var(--dim)}
     <div class=big id=corner></div>
     <button class=act id=start onclick="cmd('start')">START</button>
     <button class=act id=stop onclick="cmd('stop')">STOP</button>
+    <div><button class=small id=rec onclick="rec()">Record</button>
+      <span id=recMsg class=dim></span></div>
     <div class=big id=live></div>
     <h3>STM32 log</h3><pre id=log></pre>
   </div>
@@ -989,12 +1229,16 @@ function tab(n){pane=n;for(const k of ['Run','Tune','Tel']){
   if(n==='Tune'&&!built) loadParams(true);}
 const f=x=>x===null||x===undefined?'--':Math.round(x);
 async function cmd(c){await fetch('/api/'+c,{method:'POST'});}
+let recManual=false;
+async function rec(){await fetch('/api/record',{method:'POST',headers:{'Content-Type':'application/json'},
+  body:JSON.stringify({on:!recManual})});}
 
 // ---- Tune ----
 const GROUPS={camera:'Camera',hsv:'HSV colour ranges',lab:'Lab colour ranges',
   filter:'Pillar filter (incl. LazyGo ROI / height)',
   cone:'Wall cone fit',locate:'Pillar location',cand:'LiDAR candidates (LazyGo edges)',link:'Link',
-  yolo:'YOLO detector (models/pillars26)'};
+  yolo:'YOLO detector',
+  record:'Recording (training images to take/)'};
 const SGROUPS=['Drive & heading','Colour trigger & turn','Lane planner','Passing a pillar',
   'Wall levelling','Reverse & re-plan','Corner exit','Safety','Link','Park out'];
 
@@ -1069,6 +1313,15 @@ async function tick(){
    `pillar <b>${r.name}</b> err ${r.error} area ${r.area}`+
    (r.pillar_xy?` &nbsp;at ${r.pillar_xy[0]} fwd, ${r.pillar_xy[1]} left mm`:'')+
    (r.unknown_xy?`<br>lidar object (colour unknown) ${r.unknown_xy[0]} fwd, ${r.unknown_xy[1]} left mm`:'');
+  const rc=r.rec||{};
+  recManual=!!rc.manual;
+  $('rec').textContent=recManual?'Stop recording':'Record';
+  $('rec').style.background=recManual?'#c33':'#444';
+  $('recMsg').innerHTML=(rc.on?`<span class=bad>&#9679; REC</span> take/${rc.folder||'...'} `+
+     `${rc.saved} saved`:(rc.folder?`last: take/${rc.folder} (${rc.saved} frames)`:'not recording'))+
+    (rc.skipped?` <span class=dim>(${rc.skipped} still frames skipped)</span>`:'')+
+    (rc.dropped?` <span class=dim>(${rc.dropped} dropped)</span>`:'')+
+    (rc.error?` <span class=bad>${rc.error}</span>`:'');
   const lg=$('log'), atBottom=lg.scrollTop+lg.clientHeight>=lg.scrollHeight-5;
   lg.textContent=r.log.join('\n'); if(atBottom) lg.scrollTop=lg.scrollHeight;
   if(pane==='Tel'){
@@ -1122,8 +1375,17 @@ def status():
         "last_line": link["line"].strip(),
         "stm32_state": stm_state["state"], "corner": stm_state["corner"],
         "exit": stm_state["exit"], "lane": stm_state["lane"],
+        "rec": RECORDER.status(),
         "log": list(stm_log),
     })
+
+
+@app.route("/api/record", methods=["POST"])
+def api_record():
+    """The Record button: save frames without a run (car pushed by hand)."""
+    body = request.get_json(force=True, silent=True) or {}
+    RECORDER.set_manual(body.get("on", not RECORDER.manual))
+    return jsonify({"ok": True, "rec": RECORDER.status()})
 
 
 @app.route("/api/start", methods=["POST"])
@@ -1220,9 +1482,11 @@ def mjpeg(view="camera"):
                      (camera.FRAME_W // 2, camera.FRAME_H), (255, 255, 255), 1)
             for (x0, y0, x1, y1), _, why in v.get("cands", []):
                 if why is not None:
-                    cv2.rectangle(bgr, (x0, y0), (x1, y1), (140, 140, 140), 1)
+                    lot = why.startswith("LOT")                # the parking lot: magenta
+                    col, th = ((255, 0, 255), 2) if lot else ((140, 140, 140), 1)
+                    cv2.rectangle(bgr, (x0, y0), (x1, y1), col, th)
                     cv2.putText(bgr, why, (x0, max(12, y0 - 4)),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (140, 140, 140), 1)
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1)
             for (x0, y0, x1, y1), code, conf in v.get("dets", []):
                 cv2.rectangle(bgr, (x0, y0), (x1, y1), BOX_BGR[code], 1)
                 if conf < 1.0:                               # YOLO: show the confidence
@@ -1305,6 +1569,7 @@ def main():
     shared = SharedState()
     lidar = LidarThread(shared)
     lidar.start()
+    RECORDER.start()
     vis = VisionThread()
     vis.start()
     threading.Thread(target=run_flask, name="Flask", daemon=True).start()
@@ -1423,6 +1688,8 @@ def main():
         lidar.stop()
         vis.join(timeout=2.0)
         lidar.join(timeout=2.0)
+        RECORDER.stop()                       # after the camera: closes frames.csv
+        RECORDER.join(timeout=2.0)
         ser.close()
         print("[obstacle] stopped")
 

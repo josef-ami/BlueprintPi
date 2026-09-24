@@ -28,5 +28,9 @@
         python3 -m pytest tests/test_yolo_detector.py -q
     Tune tab, "YOLO detector": USE_YOLO (off = the old Lab/HSV masking),
     backend, threads, confidence. If the model cannot load, masking is used.
-    Retrain: record frames, label in Roboflow, train with Ultralytics at
-    imgsz=416, export onnx + ncnn (+ openvino) and replace models/pillars26/.
+    Retrain (pillars + parking lot, ~40 min at a practice round):
+    tools/yolo/PROTOCOL.md. Record on the Pi (Tune tab, Recording), then on the PC
+        python tools/yolo/yolo.py harvest      # pull, filter, pre-label, upload
+    label in Roboflow, run tools/yolo/train_colab.ipynb in Colab, then
+        python tools/yolo/yolo.py deploy       # check, copy to the Pi, switch live
+    The Pi loads the model named in models/ACTIVE (default pillars26).

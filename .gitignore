@@ -1,0 +1,5 @@
+
+# YOLO retrain loop: recordings, datasets and the active-model pointer stay local
+take/
+datasets/
+models/ACTIVE

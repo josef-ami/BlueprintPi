@@ -1,0 +1,10 @@
+{
+  "pi_host": "192.168.137.45",
+  "pi_user": "suntzu",
+  "pi_repo": "/home/suntzu/BlueprintPi",
+  "roboflow_workspace": "",
+  "roboflow_project": "",
+  "max_images": 400,
+  "empty_fraction": 0.10,
+  "prelabel_conf": 0.35
+}
