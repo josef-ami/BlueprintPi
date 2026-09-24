@@ -1,0 +1,19 @@
+[Unit]
+Description=Open Round
+Conflicts=robodash.service
+
+[Service]
+Type=simple
+User=suntzu
+WorkingDirectory=/home/suntzu
+Environment=PATH=/home/suntzu/BlueprintPi/env/bin:/usr/bin:/bin
+ExecStart=/home/suntzu/BlueprintPi/env/bin/python /home/suntzu/BlueprintPi/openRound.py
+Restart=on-failure
+RestartSec=3
+
+# stdout/stderr land in the journal, not a manually managed log file
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
