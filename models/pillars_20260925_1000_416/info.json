@@ -1,0 +1,20 @@
+{
+  "name": "pillars_20260925_1000_416",
+  "classes": {
+    "0": "GREEN PILLAR",
+    "1": "MAGENTA PARKING LOT BLOCK",
+    "2": "RED PILLAR"
+  },
+  "imgsz": 416,
+  "trained_imgsz": 416,
+  "dataset": "WRO PILLAR v5 (wro_pillar_park)",
+  "base": "pillars26",
+  "trained": "2026-09-25 10:11",
+  "mAP50": 0.8772223322505726,
+  "mAP50_95": 0.6504126920047105,
+  "per_class_mAP50": {
+    "GREEN PILLAR": 0.9392956992474315,
+    "MAGENTA PARKING LOT BLOCK": 0.7273654323345939,
+    "RED PILLAR": 0.9650058651696924
+  }
+}

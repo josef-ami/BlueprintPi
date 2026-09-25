@@ -36,7 +36,10 @@ except ImportError:                     # resize falls back to numpy (tests only
     cv2 = None
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_MODEL_DIR = os.path.join(os.path.dirname(HERE), "models", "pillars26")
+# default model: pillars + parking lot, trained 2026-09-25 on the WRO PILLAR v5 dataset
+# (GREEN 0.94 / RED 0.97 mAP50). models/ACTIVE, if present, still overrides it;
+# models/pillars26 stays as the rollback (yolo.py activate pillars26).
+DEFAULT_MODEL_DIR = os.path.join(os.path.dirname(HERE), "models", "pillars_20260925_1000_416")
 
 BACKENDS = ("ncnn", "openvino", "onnx")
 PAD_VALUE = 114

@@ -101,7 +101,7 @@ RECORDING (training images for a YOLO detector) - see tools/yolo/PROTOCOL.md
 
 WHICH MODEL (models/ACTIVE)
   models/ACTIVE holds the name of the folder under models/ to load (default
-  pillars26). `tools/yolo/yolo.py deploy` copies a new model to the Pi and
+  pillars_20260925_1000_416: pillars + parking lot; pillars26 is the rollback). `tools/yolo/yolo.py deploy` copies a new model to the Pi and
   rewrites ACTIVE; the vision thread notices within 2 s and reloads - no
   restart. Classes are matched by NAME: any class with RED / GREEN in its name
   is a sign; anything else (PARKING LOT) is drawn on the page, never steered by.
@@ -144,7 +144,7 @@ ACTIVE_FILE = os.path.join(MODELS_DIR, "ACTIVE")
 
 
 def active_model_dir():
-    """models/<name> named in models/ACTIVE, else the default (pillars26)."""
+    """models/<name> named in models/ACTIVE, else the default (sensors/yolo_detector.py)."""
     try:
         with open(ACTIVE_FILE) as f:
             name = f.read().strip()
