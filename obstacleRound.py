@@ -33,9 +33,9 @@ TUNING - WHO OWNS WHAT
   writes sensor frames, so tuning can never stall the 50 Hz feed. Nothing in
   this file blocks on the serial port.
 
-Wire frame - one ASCII line per send, SEND_HZ times a second, 18 fields:
+Wire frame - one ASCII line per send, SEND_HZ times a second, 20 fields:
 
-    left,front,right,rev,color,err,area,vseq,coneL,coneR,wallAng,pX,pY,uX,uY,sColor,sX,sY\n
+    left,front,right,rev,color,err,area,vseq,coneL,coneR,wallAng,pX,pY,uX,uY,sColor,sX,sY,mX,mY\n
 
   left/front/right  mm at 90 / 0 / 270 deg, 65535 = no return   (as openRound)
   rev               lidar revolution counter                     (as openRound)
@@ -55,14 +55,21 @@ Wire frame - one ASCII line per send, SEND_HZ times a second, 18 fields:
   sColor / sX / sY  always 2,32767,32767 - there is ONE sign per frame, the
                     largest blob. The three fields stay so the frame layout
                     (and older firmware) is unchanged.
+  mX / mY           firmware v11 park-in: the nearest MAGENTA parking-lot block
+                    (the model's magenta / parking class), mm from the LiDAR
+                    (x fwd, y left): camera bearing + the nearest LiDAR return
+                    on that ray, its face toward the car; 32767 = none. Never
+                    a sign - firmware v10 and older stop reading at field 18.
 
 Commands on the same serial line:
     S            START            X            STOP
     (firmware v10: START first drives the car out of the parking lot -
-     PARK OUT, pivot / exit / reverse arc - then the 3 laps. Tune tab,
-     "Park out": PARK_OUT_ENABLE = 0 starts the laps at once, as before.)
+     PARK OUT, pivot / exit / reverse arc - then the 3 laps; v11 then parks
+     in the lot - PARK IN.)
     N <name> <v> set a firmware parameter       ?P  dump the table
     ?V           firmware version / boot id
+    (firmware v11 has its parameter table OFF: every value is set in the
+     .ino and these lines are ignored - the Tune tab changes nothing there.)
 Replies from the firmware start with '!' (parameters) or '#' (log).
 
 Silence rules: lidar stale -> no frames are sent (commands still are).
@@ -262,6 +269,7 @@ sync_globals()
 lock = threading.Lock()
 vision = {"color": COL_NONE, "err": 0, "area": 0, "seq": 0, "t": 0.0,
           "box": None, "bearing": None,          # box in 640x480 px, for the overlay
+          "m_bearing": None, "m_area": 0,        # the largest MAGENTA (parking lot) box
           "mode": "starting", "infer_ms": 0.0, "fps": 0.0, "yolo_error": None}
 latest_frame = None                              # RGB, only kept while someone watches
 viewers = 0
@@ -678,6 +686,12 @@ def find_pillars(hsv, lab, pf):
     return accepted, cands, floor
 
 
+def is_lot_class(name):
+    """A model class that is the parking lot's magenta blocks."""
+    n = name.upper()
+    return any(k in n for k in ("MAGENTA", "PARK", "LOT", "PINK", "PURPLE"))
+
+
 def yolo_colour(name):
     """Model class name -> wire colour code; None for a class that is not a
     sign (e.g. a later 'magenta' parking class): shown, never steered by."""
@@ -705,6 +719,7 @@ class VisionThread(threading.Thread):
         self._yolo_key = None
         self._model_dir = active_model_dir()
         self._model_check = 0.0
+        self._lot = None                  # largest parking-lot box this frame: (area, box)
 
     def stop(self):
         self._halt.set()
@@ -763,6 +778,11 @@ class VisionThread(threading.Thread):
                     return (colour, int(cx) - centre, int(area), (x0, y0, x1, y1),
                             bearing_from_px(cx, cy))
 
+                m_bearing, m_area = None, 0
+                if self._lot is not None:                 # the parking lot (never a sign)
+                    m_area, (x0, y0, x1, y1) = self._lot
+                    m_bearing = bearing_from_px((x0 + x1) / 2.0, (y0 + y1) / 2.0)
+
                 seq = (seq + 1) & 0xFFFFFFFF
                 if not hits:
                     color, err, area, box, bearing = COL_NONE, 0, 0, None, None
@@ -776,6 +796,7 @@ class VisionThread(threading.Thread):
                 with lock:
                     vision.update(color=color, err=err, area=int(area),
                                   seq=seq, t=now, box=box, bearing=bearing,
+                                  m_bearing=m_bearing, m_area=int(m_area),
                                   mode=mode, fps=fps,
                                   infer_ms=self.yolo.infer_ms if mode.startswith("YOLO") else 0.0,
                                   yolo_error=self.yolo_error)
@@ -797,6 +818,7 @@ class VisionThread(threading.Thread):
         """(hits, cands, floor, mode). hits largest first; cands = every box for
         the overlay as (box, colour, reject_code_or_None)."""
         det = self._detector()
+        self._lot = None
         if det is not None:
             try:
                 found = det.detect(frame, conf=YOLO_CONF, iou=YOLO_IOU)
@@ -812,6 +834,10 @@ class VisionThread(threading.Thread):
                     if code is None:                         # not a sign class:
                         tag = "LOT" if "PARK" in d.name.upper() else "M"   # shown, never steered by
                         cands.append((box, code, f"{tag} {d.conf:.2f}"))
+                        if is_lot_class(d.name):             # the parking lot -> mX/mY
+                            a = d.w * d.h / (sx * sy)
+                            if self._lot is None or a > self._lot[0]:
+                                self._lot = (a, box)
                     elif d.h < YOLO_MIN_BOX_H:
                         cands.append((box, code, "H"))
                     else:
@@ -839,6 +865,7 @@ def vision_now(now):
         v = dict(vision)
     if now - v["t"] > VISION_STALE_S:
         v["color"], v["err"], v["area"], v["bearing"] = COL_NONE, 0, 0, None
+        v["m_bearing"], v["m_area"] = None, 0
     return v
 
 
@@ -965,6 +992,34 @@ def locate_pillar(ranges, bearing_deg, area, cam_fwd=None):
         return None
     if dist > PILLAR_MAX_MM:
         return None
+    return (cam_fwd + dist * math.cos(b), dist * math.sin(b))
+
+
+def locate_block(ranges, bearing_deg, cam_fwd=None):
+    """(x, y) mm of a parking-lot block's face in the LiDAR frame, or None.
+
+    Like locate_pillar(), but a block is 200 x 20 mm and seen from any angle,
+    so there is no size window: the nearest LiDAR return within RAY_WINDOW_DEG
+    of the camera ray, 150..2500 mm from the camera. The firmware (v11 park-in)
+    only uses it to know roughly where the lot is and which side it is on -
+    the LiDAR side beam finds the blocks themselves.
+    """
+    if bearing_deg is None:
+        return None
+    if cam_fwd is None:
+        cam_fwd = CAMERA_FWD_MM
+    r = np.asarray(ranges, dtype=np.float64)
+    ok = np.isfinite(r) & (r > 60)
+    r = np.where(ok, r, 0.0)                     # no inf / nan in the maths below
+    px, py = r * _COS - cam_fwd, r * _SIN
+    dist_c = np.hypot(px, py)
+    ang = np.degrees(np.arctan2(py, px)) - bearing_deg
+    ang = (ang + 180.0) % 360.0 - 180.0
+    cand = ok & (np.abs(ang) <= RAY_WINDOW_DEG) & (dist_c > 150) & (dist_c < 2500)
+    if not cand.any():
+        return None
+    dist = float(dist_c[cand].min())
+    b = math.radians(bearing_deg)
     return (cam_fwd + dist * math.cos(b), dist * math.sin(b))
 
 
@@ -1119,11 +1174,22 @@ def track_stm32(line):
         stm_state["state"] = "RUNNING"
     elif s.startswith("FINAL_STRAIGHT"):
         stm_state["state"] = "FINAL STRAIGHT"
+    elif s.startswith("PARK IN:"):                     # firmware v11 park-in
+        stm_state["state"] = "PARK IN - finding the lot"
+    elif s.startswith("LOT FOUND"):
+        stm_state["state"] = "PARK IN - lot found"
+    elif s.startswith(("SWING IN", "BACK:", "MEASURE", "PIVOT IN", "REDO", "SIDESTEP", "SWING OUT")) \
+            and stm_state["state"].startswith("PARK IN"):
+        stm_state["state"] = "PARK IN - " + s.split(":")[0].split(" (")[0]
+    elif s.startswith("PARK IN ABORT"):
+        stm_state["state"] = s.replace("PARK IN ABORT", "PARK IN ABORTED")
+    elif s.startswith("PARKED"):
+        stm_state["state"] = "PARKED"
     elif s.startswith("STOP from Pi") or s.startswith("STOP from button"):
         stm_state["state"] = "STOPPED"
         RECORDER.end_run()
     elif s.startswith("FINISHED"):
-        if stm_state["state"] != "STOPPED" and not stm_state["state"].startswith("PARK OUT ABORTED"):
+        if stm_state["state"] not in ("STOPPED", "PARKED") and "ABORTED" not in stm_state["state"]:
             stm_state["state"] = "FINISHED"
         RECORDER.end_run()
     elif s.startswith("first Pi frame"):
@@ -1633,14 +1699,16 @@ def main():
                 pX, pY = _pxy(pxy)
                 uxy = unclassified(cands, (pxy,))
                 uX, uY = _pxy(uxy)
+                mxy = locate_block(lidar._ranges, v["m_bearing"])  # the parking lot
+                mX, mY = _pxy(mxy)
                 line = (f"{_u16(l)},{_u16(f)},{_u16(r)},{lidar.rev},"
                         f"{v['color']},{v['err']},{v['area']},{v['seq']},"
                         f"{_cone_u16(cl)},{_cone_u16(cr)},{_ang(yaw)},{pX},{pY},{uX},{uY},"
-                        f"{COL_NONE},{PXY_NONE},{PXY_NONE}\n")        # no second sign
+                        f"{COL_NONE},{PXY_NONE},{PXY_NONE},{mX},{mY}\n")   # no second sign; lot
                 if write(line.encode("ascii")):
                     frames += 1
                 link.update(line=line, t=now, f=f, l=l, r=r, cl=cl, cr=cr,
-                            yaw=yaw, pxy=pxy, uxy=uxy)
+                            yaw=yaw, pxy=pxy, uxy=uxy, mxy=mxy)
             if live != was_live:
                 note("[obstacle] lidar LIVE - streaming" if live else
                      "[obstacle] lidar STALE - silent")
