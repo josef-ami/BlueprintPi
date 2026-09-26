@@ -235,6 +235,7 @@ YOLO_THREADS = 3
 YOLO_CONF = 0.5
 YOLO_IOU = 0.5
 YOLO_MIN_BOX_H = 0
+LOT_SUPPRESS_IOU = 0.3
 YOLO_BACKENDS = ("auto", "ncnn", "openvino", "onnx")      # YOLO_BACKEND index
 
 RECORD_RUNS = False
@@ -692,6 +693,18 @@ def is_lot_class(name):
     return any(k in n for k in ("MAGENTA", "PARK", "LOT", "PINK", "PURPLE"))
 
 
+def on_lot_box(b, lot):
+    """A sign box that overlaps a parking-lot box by LOT_SUPPRESS_IOU, or
+    whose centre lies inside it."""
+    ix = max(0.0, min(b[2], lot[2]) - max(b[0], lot[0]))
+    iy = max(0.0, min(b[3], lot[3]) - max(b[1], lot[1]))
+    inter = ix * iy
+    union = (b[2] - b[0]) * (b[3] - b[1]) + (lot[2] - lot[0]) * (lot[3] - lot[1]) - inter
+    cx, cy = (b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0
+    inside = lot[0] <= cx <= lot[2] and lot[1] <= cy <= lot[3]
+    return inside or (union > 0 and inter / union >= LOT_SUPPRESS_IOU)
+
+
 def yolo_colour(name):
     """Model class name -> wire colour code; None for a class that is not a
     sign (e.g. a later 'magenta' parking class): shown, never steered by."""
@@ -828,13 +841,14 @@ class VisionThread(threading.Thread):
                 self.yolo_error = str(e)
                 found = None
             if found is not None:
-                hits, cands = [], []
+                hits, cands, lot_boxes = [], [], []
                 for d in found:
                     box, code = d.box(), yolo_colour(d.name)
                     if code is None:                         # not a sign class:
                         tag = "LOT" if "PARK" in d.name.upper() else "M"   # shown, never steered by
                         cands.append((box, code, f"{tag} {d.conf:.2f}"))
                         if is_lot_class(d.name):             # the parking lot -> mX/mY
+                            lot_boxes.append(box)
                             a = d.w * d.h / (sx * sy)
                             if self._lot is None or a > self._lot[0]:
                                 self._lot = (a, box)
@@ -844,6 +858,16 @@ class VisionThread(threading.Thread):
                         # box area in 320x240 px, the unit AREA_K and the
                         # locate_pillar() sanity window were written for
                         hits.append((code, d.w * d.h / (sx * sy), box, d.conf))
+                # a RED/GREEN box on top of a lot box is the lot block read twice
+                # (the model sometimes calls a magenta block RED as well): drop it
+                if LOT_SUPPRESS_IOU > 0 and lot_boxes:
+                    keep = []
+                    for h in hits:
+                        if any(on_lot_box(h[2], lb) for lb in lot_boxes):
+                            cands.append((h[2], h[0], "LOT?"))
+                        else:
+                            keep.append(h)
+                    hits = keep
                 hits.sort(key=lambda t: -t[1])              # largest blob first
                 return hits, cands, None, f"YOLO {det.backend} {os.path.basename(det.model_dir)}"
 

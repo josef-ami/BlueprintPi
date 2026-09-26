@@ -242,6 +242,9 @@ PI_SPECS = [
          "overlap above which two boxes of one colour count as the same pillar"),
     Spec("YOLO_MIN_BOX_H", 0, 0, 200, "yolo", "i",
          "ignore boxes shorter than this (640x480 px); 0 = keep every detection (reject code H)"),
+    Spec("LOT_SUPPRESS_IOU", 0.3, 0.0, 1.0, "yolo", "f",
+         "drop a RED/GREEN box whose centre is inside a parking-lot (magenta) box or that "
+         "overlaps one this much (reject code LOT?); 0 = off"),
 
     # ---- recording: training images for the YOLO detector ----
     Spec("RECORD_RUNS", False, 0, 1, "record", "b",
