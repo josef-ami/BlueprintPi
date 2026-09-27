@@ -227,6 +227,12 @@ PI_SPECS = [
          "A strip, not an angle cone: a cone sees the side walls"),
     Spec("STRIP_MAX_MM", 800.0, 200, 3000, "guard", "f",
          "field 20: look this far ahead; nothing nearer inside the strip = 32767 (clear)"),
+    Spec("SEND_SECOND_SIGN", True, 0, 1, "locate", "b",
+         "fields 15-17: also send the second-largest sign (firmware v12.3 SIGN_FIX_ENABLE uses it "
+         "to see a slalom coming; with that switch off the firmware ignores it)"),
+    Spec("SECOND_EXCLUDE_MM", 150.0, 50, 400, "locate", "f",
+         "the second sign may not be located on LiDAR returns within this of the first sign "
+         "(far away both sit in one 8 deg ray window - it read the first sign's face)"),
     Spec("FACE_BAND_MM", 40.0, 10, 150, "guard", "f",
          "fields 21-22: the lot faces are the nearest returns beside the LiDAR in a band from "
          "10 mm behind it to this far ahead (park-in MEASURE: the visible 30 mm of each block face)"),

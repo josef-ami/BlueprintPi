@@ -248,6 +248,8 @@ CAND_FOV_DEG = 90
 STRIP_HALF_W_MM = 87.0
 STRIP_MAX_MM = 800.0
 FACE_BAND_MM = 40.0
+SEND_SECOND_SIGN = True
+SECOND_EXCLUDE_MM = 150.0
 SEND_HZ = 50
 CMD_REPEAT = 3
 BEARING_TOL_DEG = 2
@@ -294,6 +296,7 @@ sync_globals()
 lock = threading.Lock()
 vision = {"color": COL_NONE, "err": 0, "area": 0, "seq": 0, "t": 0.0,
           "box": None, "bearing": None,          # box in 640x480 px, for the overlay
+          "s_color": COL_NONE, "s_bearing": None, "s_area": 0,   # second-largest sign (fields 15-17)
           "m_bearing": None, "m_area": 0,        # the largest MAGENTA (parking lot) box
           "mode": "starting", "infer_ms": 0.0, "fps": 0.0, "yolo_error": None}
 latest_frame = None                              # RGB, only kept while someone watches
@@ -827,6 +830,9 @@ class VisionThread(threading.Thread):
                     color, err, area, box, bearing = COL_NONE, 0, 0, None, None
                 else:                                     # the largest blob, only
                     color, err, area, box, bearing = describe(hits[0])
+                s_color, s_bearing, s_area = COL_NONE, None, 0
+                if SEND_SECOND_SIGN and len(hits) > 1:     # v12.3: the next sign, for the slalom planner
+                    s_color, _, s_area, _, s_bearing = describe(hits[1])
 
                 now = time.monotonic()
                 dt, t_prev = now - t_prev, now
@@ -836,6 +842,7 @@ class VisionThread(threading.Thread):
                     vision.update(color=color, err=err, area=int(area),
                                   seq=seq, t=now, box=box, bearing=bearing,
                                   m_bearing=m_bearing, m_area=int(m_area),
+                                  s_color=s_color, s_bearing=s_bearing, s_area=int(s_area),
                                   mode=mode, fps=fps,
                                   infer_ms=self.yolo.infer_ms if mode.startswith("YOLO") else 0.0,
                                   yolo_error=self.yolo_error)
@@ -916,6 +923,7 @@ def vision_now(now):
     if now - v["t"] > VISION_STALE_S:
         v["color"], v["err"], v["area"], v["bearing"] = COL_NONE, 0, 0, None
         v["m_bearing"], v["m_area"] = None, 0
+        v["s_color"], v["s_bearing"], v["s_area"] = COL_NONE, None, 0
     return v
 
 
@@ -1008,7 +1016,7 @@ _DEG = np.radians(np.arange(360))
 _COS, _SIN = np.cos(_DEG), np.sin(_DEG)
 
 
-def locate_pillar(ranges, bearing_deg, area, cam_fwd=None):
+def locate_pillar(ranges, bearing_deg, area, cam_fwd=None, exclude=None):
     """(x, y) mm of the pillar centre in the LiDAR frame, or None.
 
     Direction comes from the CAMERA (fresh, 30 Hz). Only the DISTANCE comes
@@ -1032,6 +1040,8 @@ def locate_pillar(ranges, bearing_deg, area, cam_fwd=None):
     ang = (ang + 180.0) % 360.0 - 180.0
     d_area = AREA_K / math.sqrt(area) if area and area > 0 else None
     cand = ok & (np.abs(ang) <= RAY_WINDOW_DEG) & (dist_c > 30)
+    if exclude is not None:                         # v12.3: never the returns of an already located sign
+        cand &= np.hypot(r * _COS - exclude[0], r * _SIN - exclude[1]) > SECOND_EXCLUDE_MM
     if d_area is not None:
         cand &= (dist_c > 0.5 * d_area) & (dist_c < 2.0 * d_area)
     if cand.any():
@@ -1829,12 +1839,19 @@ def main():
                 pX, pY = _pxy(pxy)
                 uxy = unclassified(cands, (pxy,))
                 uX, uY = _pxy(uxy)
+                sxy = None                                   # v12.3: second sign, never on the first one's returns
+                if v["s_color"] != COL_NONE:
+                    sxy = locate_pillar(lidar._ranges, v["s_bearing"], v["s_area"], exclude=pxy)
+                    if sxy is not None and pxy is not None and math.hypot(sxy[0] - pxy[0], sxy[1] - pxy[1]) < SECOND_EXCLUDE_MM:
+                        sxy = None
+                sX, sY = _pxy(sxy)
+                sC = v["s_color"] if sxy is not None else COL_NONE
                 mxy = locate_block(lidar._ranges, v["m_bearing"])  # the parking lot
                 mX, mY = _pxy(mxy)
                 line = (f"{_u16(l)},{_u16(f)},{_u16(r)},{lidar.rev},"
                         f"{v['color']},{v['err']},{v['area']},{v['seq']},"
                         f"{_cone_u16(cl)},{_cone_u16(cr)},{_ang(yaw)},{pX},{pY},{uX},{uY},"
-                        f"{COL_NONE},{PXY_NONE},{PXY_NONE},{mX},{mY},"      # no second sign; lot
+                        f"{sC},{sX},{sY},{mX},{mY},"                         # second sign (v12.3); lot
                         f"{_mm(strip)},{_mm(faces[0])},{_mm(faces[1])}\n")  # v12: guard strip, lot faces
                 if write(line.encode("ascii")):
                     frames += 1
