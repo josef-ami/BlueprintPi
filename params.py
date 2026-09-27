@@ -91,6 +91,7 @@ class Spec:
 #   cone     the 45 deg wall fits that give lane offset and wall angle
 #   locate   turning a camera bearing + LiDAR range into a pillar position
 #   cand     LiDAR-only objects whose colour is not known yet (LazyGo edges)
+#   guard    the front-guard strip and the lot faces (firmware v12, fields 20-22)
 #   link     serial framing
 #   yolo     the trained pillar detector (sensors/yolo_detector.py)
 #   record   saving camera frames to take/ for training a detector
@@ -219,6 +220,16 @@ PI_SPECS = [
          "wider than this is not a sign (50 mm, 71 diagonal)"),
     Spec("CAND_FOV_DEG", 90, 20, 180, "cand", "i",
          "search +/- this many degrees either side of forward"),
+
+    # ---- front guard + lot faces (firmware v12, frame fields 20-22) ----
+    Spec("STRIP_HALF_W_MM", 87.0, 40, 300, "guard", "f",
+         "field 20: half-width of the strip ahead the front guard watches (car 57 + margin 30). "
+         "A strip, not an angle cone: a cone sees the side walls"),
+    Spec("STRIP_MAX_MM", 800.0, 200, 3000, "guard", "f",
+         "field 20: look this far ahead; nothing nearer inside the strip = 32767 (clear)"),
+    Spec("FACE_BAND_MM", 40.0, 10, 150, "guard", "f",
+         "fields 21-22: the lot faces are the nearest returns beside the LiDAR in a band from "
+         "10 mm behind it to this far ahead (park-in MEASURE: the visible 30 mm of each block face)"),
 
     # ---- link ----
     Spec("SEND_HZ", 50, 5, 200, "link", "i", "sensor frames per second"),

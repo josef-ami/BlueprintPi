@@ -33,9 +33,10 @@ TUNING - WHO OWNS WHAT
   writes sensor frames, so tuning can never stall the 50 Hz feed. Nothing in
   this file blocks on the serial port.
 
-Wire frame - one ASCII line per send, SEND_HZ times a second, 20 fields:
+Wire frame - one ASCII line per send, SEND_HZ times a second, 23 fields:
 
-    left,front,right,rev,color,err,area,vseq,coneL,coneR,wallAng,pX,pY,uX,uY,sColor,sX,sY,mX,mY\n
+    left,front,right,rev,color,err,area,vseq,coneL,coneR,wallAng,pX,pY,uX,uY,sColor,sX,sY,mX,mY,
+    fwdStrip,lotFaceL,lotFaceR\n
 
   left/front/right  mm at 90 / 0 / 270 deg, 65535 = no return   (as openRound)
   rev               lidar revolution counter                     (as openRound)
@@ -60,6 +61,15 @@ Wire frame - one ASCII line per send, SEND_HZ times a second, 20 fields:
                     (x fwd, y left): camera bearing + the nearest LiDAR return
                     on that ray, its face toward the car; 32767 = none. Never
                     a sign - firmware v10 and older stop reading at field 18.
+  fwdStrip          firmware v12 front guard: the nearest LiDAR return AHEAD inside
+                    a strip the car's width (+/- STRIP_HALF_W_MM), mm from the
+                    LiDAR along the car axis; 32767 = clear to STRIP_MAX_MM.
+                    A strip, not an angle cone: a wide cone sees the side walls.
+  lotFaceL/R        firmware v12 park-in MEASURE: lateral mm (+ = left) to the
+                    nearest return beside the LiDAR in a thin band level with it
+                    (-10 .. FACE_BAND_MM ahead); with the car perpendicular in the
+                    lot mouth these are the two blocks' inner faces; 32767 = none.
+                    Firmware v11 and older stop reading at field 20.
 
 Commands on the same serial line:
     S            START            X            STOP
@@ -84,7 +94,7 @@ PILLAR DETECTION: YOLO FIRST, COLOUR MASKING AS THE FALLBACK
   USE_YOLO, backend, threads, confidence, NMS overlap, minimum box height.
   If no backend can load the model, or USE_YOLO is off, the Lab/HSV masking
   below does the job exactly as before. Everything after detection - bearing,
-  LiDAR range, the 18-field frame - is the same for both, so the STM32 cannot
+  LiDAR range, the frame - is the same for both, so the STM32 cannot
   tell which one found the pillar. The model was trained on RGB frames taken
   with SWAP_RB on: keep it on, or red and blue swap and the model sees nonsense.
   The Run tab shows which detector is live and its time per frame.
@@ -195,7 +205,7 @@ PI = prm.PiParams(prm.PI_SPECS)
 STM = prm.StmParams()
 
 _MIRRORED = [s.name for s in prm.PI_SPECS
-             if s.group in ("camera", "cone", "locate", "cand", "link", "lab", "yolo", "record")]
+             if s.group in ("camera", "cone", "locate", "cand", "guard", "link", "lab", "yolo", "record")]
 
 # defaults, so the names exist before the first sync
 MIN_AREA_PROC = 250
@@ -224,6 +234,9 @@ CAND_EDGE_MM = 150.0
 CAND_MIN_WIDTH_MM = 25.0
 CAND_MAX_WIDTH_MM = 120.0
 CAND_FOV_DEG = 90
+STRIP_HALF_W_MM = 87.0
+STRIP_MAX_MM = 800.0
+FACE_BAND_MM = 40.0
 SEND_HZ = 50
 CMD_REPEAT = 3
 BEARING_TOL_DEG = 2
@@ -277,7 +290,8 @@ viewers = 0
 
 link = {"line": "", "t": 0.0, "live": False, "serial_ok": False,
         "f": None, "l": None, "r": None, "cl": None, "cr": None,
-        "yaw": None, "pxy": None, "uxy": None, "hz": 0.0}
+        "yaw": None, "pxy": None, "uxy": None, "hz": 0.0,
+        "strip": None, "faces": [None, None]}
 stm_log = collections.deque(maxlen=LOG_LINES)
 stm_state = {"state": "waiting for STM32", "corner": "", "exit": "", "lane": ""}
 commands = queue.Queue()                          # written to serial by the main loop only
@@ -1048,6 +1062,60 @@ def locate_block(ranges, bearing_deg, cam_fwd=None):
 
 
 # --------------------------------------------------------------------------
+# front guard strip + lot faces (firmware v12, frame fields 20-22)
+# --------------------------------------------------------------------------
+#
+# fwdStrip: the firmware's front guard wants "is anything in the car's way",
+# not "what is at 0 deg". A single beam misses a sign a few degrees off the
+# axis that the bumper corner would still hit; a wide ANGLE cone is worse the
+# other way - at 45 deg it sees the side wall 141 mm away with the car 100 mm
+# off it. So: every return inside a STRIP the car's width (+/- STRIP_HALF_W_MM)
+# straight ahead, and the nearest one along the car axis. Near the car the
+# strip is wide in angle (+/-30 deg at 150 mm), far away narrow.
+#
+# lotFaceL / lotFaceR: park-in MEASURE stands the car perpendicular in the lot
+# mouth with the LiDAR ~170 mm from the wall, 30 mm inside the 200 mm blocks.
+# The single 90 / 270 deg beams graze the block ends; instead, take every return
+# beside the LiDAR in a thin band level with it (-10 .. FACE_BAND_MM ahead) and,
+# per side, the median of the returns within 30 mm of the nearest - the block's
+# inner face, not the wall behind it. Sent all the time; only MEASURE reads it.
+
+def front_strip(ranges):
+    """mm from the LiDAR along the car axis to the nearest return inside the strip
+    ahead, or None when the strip is clear to STRIP_MAX_MM."""
+    r = np.asarray(ranges, dtype=np.float64)
+    ok = np.isfinite(r) & (r > 60)                   # C1 minimum range; self-returns
+    r = np.where(ok, r, 0.0)                         # no inf * 0 below
+    x, y = r * _COS, r * _SIN
+    m = ok & (x > 0) & (x < STRIP_MAX_MM) & (np.abs(y) <= STRIP_HALF_W_MM)
+    return float(x[m].min()) if m.any() else None
+
+
+def lot_faces(ranges):
+    """[left, right] lateral mm (+ = left) of the nearest surface beside the LiDAR,
+    level with it; None for a side with fewer than 3 returns."""
+    r = np.asarray(ranges, dtype=np.float64)
+    ok = np.isfinite(r) & (r > 60)
+    r = np.where(ok, r, 0.0)
+    x, y = r * _COS, r * _SIN
+    band = ok & (x > -10.0) & (x < FACE_BAND_MM) & (np.abs(y) > 40.0) & (np.abs(y) < 400.0)
+    out = []
+    for side in (1.0, -1.0):
+        ys = np.abs(y[band & (np.sign(y) == side)])
+        if ys.size < 3:
+            out.append(None)
+            continue
+        near = ys[ys < ys.min() + 30.0]              # the face, not the wall behind it
+        out.append(side * float(np.median(near)))
+    return out
+
+
+def _mm(v):
+    """Field value: mm rounded, 32767 for None (and never 32767 by accident)."""
+    return PXY_NONE if v is None else max(-32766, min(32766, int(round(v))))
+
+
+# --------------------------------------------------------------------------
 # LiDAR pillar candidates - objects inside the corridor, colour unknown
 # --------------------------------------------------------------------------
 #
@@ -1326,7 +1394,8 @@ async function rec(){await fetch('/api/record',{method:'POST',headers:{'Content-
 // ---- Tune ----
 const GROUPS={camera:'Camera',hsv:'HSV colour ranges',lab:'Lab colour ranges',
   filter:'Pillar filter (incl. LazyGo ROI / height)',
-  cone:'Wall cone fit',locate:'Pillar location',cand:'LiDAR candidates (LazyGo edges)',link:'Link',
+  cone:'Wall cone fit',locate:'Pillar location',cand:'LiDAR candidates (LazyGo edges)',
+  guard:'Front guard strip + lot faces (v12)',link:'Link',
   yolo:'YOLO detector',
   record:'Recording (training images to take/)'};
 const SGROUPS=['Drive & heading','Colour trigger & turn','Lane planner','Passing a pillar',
@@ -1400,6 +1469,7 @@ async function tick(){
      `${r.vis_fps} fps</span>`+(r.yolo_error?` <span class=bad title="${r.yolo_error}">YOLO error</span>`:'')+`<br>`+
    `L ${f(r.left)} &nbsp;F ${f(r.front)} &nbsp;R ${f(r.right)} mm<br>`+
    `cone L ${f(r.cone_left)} &nbsp;R ${f(r.cone_right)} mm &nbsp;yaw ${r.wall_yaw===null?'--':r.wall_yaw+'°'}<br>`+
+   `front strip ${r.front_strip===null?'clear':r.front_strip+' mm'} &nbsp;lot faces L ${f(r.lot_faces[0])} R ${f(r.lot_faces[1])} mm<br>`+
    `pillar <b>${r.name}</b> err ${r.error} area ${r.area}`+
    (r.pillar_xy?` &nbsp;at ${r.pillar_xy[0]} fwd, ${r.pillar_xy[1]} left mm`:'')+
    (r.unknown_xy?`<br>lidar object (colour unknown) ${r.unknown_xy[0]} fwd, ${r.unknown_xy[1]} left mm`:'');
@@ -1423,7 +1493,9 @@ async function tick(){
       ['frame seq',r.vseq],
       ['pillar x,y',r.pillar_xy?r.pillar_xy.join(', ')+' mm':'--'],
       ['unknown x,y',r.unknown_xy?r.unknown_xy.join(', ')+' mm':'--']]);
-    rows($('telLink'),[['lidar',r.lidar_live?'live':'STALE'],['serial',r.serial_ok?'open':'closed'],
+    rows($('telLink'),[['front strip (guard)',r.front_strip===null?'clear':r.front_strip+' mm'],
+      ['lot faces L / R',f(r.lot_faces[0])+' / '+f(r.lot_faces[1])+' mm'],
+      ['lidar',r.lidar_live?'live':'STALE'],['serial',r.serial_ok?'open':'closed'],
       ['frame rate',r.hz.toFixed(1)+' Hz'],['front/left/right',
        f(r.front)+' / '+f(r.left)+' / '+f(r.right)+' mm']]);
     $('telLine').textContent=r.last_line||'(nothing sent - lidar stale)';
@@ -1461,6 +1533,8 @@ def status():
                      [round(link["pxy"][0]), round(link["pxy"][1])],
         "unknown_xy": None if link.get("uxy") is None else
                       [round(link["uxy"][0]), round(link["uxy"][1])],
+        "front_strip": None if link.get("strip") is None else round(link["strip"]),
+        "lot_faces": [None if v is None else round(v) for v in link.get("faces", [None, None])],
         "lidar_live": link["live"], "serial_ok": link["serial_ok"], "hz": link["hz"],
         "last_line": link["line"].strip(),
         "stm32_state": stm_state["state"], "corner": stm_state["corner"],
@@ -1673,6 +1747,8 @@ def main():
     f = l = r = None
     cl = cr = yaw = None
     cands = []
+    faces = [None, None]                    # lot faces (fields 21-22), once per revolution
+    strip = None                            # front guard strip (field 20), every frame
     cone_rev = -1
     frames = 0
     v = vision_now(time.monotonic())
@@ -1717,6 +1793,8 @@ def main():
                     cone_rev = lidar.rev
                     cl, cr, yaw, lline, rline = cones_full(lidar._ranges)
                     cands = lidar_candidates(lidar._ranges, lline, rline)
+                    faces = lot_faces(lidar._ranges)
+                strip = front_strip(lidar._ranges)  # every frame: the guard is time-critical
                 v = vision_now(now)
                 pxy = (locate_pillar(lidar._ranges, v["bearing"], v["area"])
                        if v["color"] != COL_NONE else None)
@@ -1728,11 +1806,12 @@ def main():
                 line = (f"{_u16(l)},{_u16(f)},{_u16(r)},{lidar.rev},"
                         f"{v['color']},{v['err']},{v['area']},{v['seq']},"
                         f"{_cone_u16(cl)},{_cone_u16(cr)},{_ang(yaw)},{pX},{pY},{uX},{uY},"
-                        f"{COL_NONE},{PXY_NONE},{PXY_NONE},{mX},{mY}\n")   # no second sign; lot
+                        f"{COL_NONE},{PXY_NONE},{PXY_NONE},{mX},{mY},"      # no second sign; lot
+                        f"{_mm(strip)},{_mm(faces[0])},{_mm(faces[1])}\n")  # v12: guard strip, lot faces
                 if write(line.encode("ascii")):
                     frames += 1
                 link.update(line=line, t=now, f=f, l=l, r=r, cl=cl, cr=cr,
-                            yaw=yaw, pxy=pxy, uxy=uxy, mxy=mxy)
+                            yaw=yaw, pxy=pxy, uxy=uxy, mxy=mxy, strip=strip, faces=faces)
             if live != was_live:
                 note("[obstacle] lidar LIVE - streaming" if live else
                      "[obstacle] lidar STALE - silent")
