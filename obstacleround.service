@@ -1,0 +1,26 @@
+[Unit]
+Description=Obstacle round - sensor feed to the STM32 (race mode: no web page)
+# one process may hold the lidar, the camera and the STM32 port at a time
+Conflicts=openround.service robodash.service robot.service
+After=multi-user.target
+
+[Service]
+Type=simple
+User=suntzu
+WorkingDirectory=/home/suntzu/BlueprintPi
+Environment=PATH=/home/suntzu/BlueprintPi/env/bin:/usr/bin:/bin
+Environment=PYTHONUNBUFFERED=1
+# full CPU clock for inference (the "+" runs this one line as root)
+ExecStartPre=+/bin/sh -c 'for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo performance > "$g"; done'
+ExecStart=/home/suntzu/BlueprintPi/env/bin/python /home/suntzu/BlueprintPi/obstacleRound.py
+# ahead of anything else on the Pi for CPU time
+Nice=-10
+Restart=on-failure
+RestartSec=2
+
+# race mode prints almost nothing; what it does print (aborts, errors) is in the journal
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

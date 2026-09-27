@@ -41,9 +41,10 @@ def load_lidar_config(path=CONFIG_PATH):
 
 
 class LidarThread(threading.Thread):
-    def __init__(self, shared: SharedState):
+    def __init__(self, shared: SharedState, publish=True):
         super().__init__(name="LidarThread", daemon=True)
         self.shared = shared
+        self.publish = publish          # False: no 20 Hz SharedState copies (obstacleRound race mode)
         self._lidar = None
         self._loop = None
         self._async_stop = None
@@ -85,7 +86,8 @@ class LidarThread(threading.Thread):
         async with asyncio.TaskGroup() as tg:
             tg.create_task(self._consume(self._lidar.output_queue,
                                          self._async_stop))
-            tg.create_task(self._publisher(self._async_stop))
+            if self.publish:
+                tg.create_task(self._publisher(self._async_stop))
             tg.create_task(self._lidar.simple_scan())
 
     async def _consume(self, queue, stop_event):

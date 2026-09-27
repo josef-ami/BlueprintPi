@@ -10,8 +10,18 @@ Run it INSTEAD of openRound.py / dashboard.py / main.py - one process may hold
 the lidar and the camera at a time. Put it in the repo root next to
 openRound.py (it imports from there and from sensors/).
 
-    python3 obstacleRound.py
-    then open  http://<pi>:5000
+    python3 obstacleRound.py            RACE mode (default): sensor feed only
+    python3 obstacleRound.py --debug    + the web page on http://<pi>:5000
+
+RACE MODE (default) vs --debug
+  Race mode gives the camera / YOLO thread every spare cycle: NO web server,
+  no MJPEG stream, no recorder, no 1 Hz console status, no STM32 log echo
+  (only aborts / errors are printed), no tuning traffic to the STM32 (its
+  table is off since firmware v10), no LiDAR "unknown object" search (the
+  firmware ignores uX/uY), and the LiDAR thread no longer copies its scan into
+  SharedState 20x a second. The frame the STM32 gets is the same 23 fields.
+  START / STOP: the STM32's button (PB12) - there is no page to press.
+  --debug (or DEBUG = True below) brings all of it back.
 
 PAGE
   Run        camera stream, START / STOP, state, STM32 log
@@ -173,6 +183,7 @@ def active_model_dir():
     return DEFAULT_MODEL_DIR
 
 # ---------------- fixed, not tunable ----------------
+DEBUG       = False          # True or --debug: web page, stream, recorder, console status
 PROC_SIZE   = (320, 240)     # detection resolution
 FLASK_PORT  = 5000
 LOG_LINES   = 200            # STM32 log lines kept for the page
@@ -794,7 +805,8 @@ class VisionThread(threading.Thread):
             while not self._halt.is_set():
                 pf = PILLAR_FILTER                        # one read, one frame
                 frame = camera.grab_rgb(cam, SWAP_RB)
-                RECORDER.offer(frame)                     # raw frame, no overlay
+                if DEBUG:
+                    RECORDER.offer(frame)                 # raw frame, no overlay
 
                 # hits: (colour, area in 320x240 px, box in 640x480 px, confidence)
                 hits, cands, floor, mode = self._find(frame, pf, sx, sy)
@@ -1706,7 +1718,8 @@ def handle_rx(text):
         if not STM.synced:
             handle_rx.pushed = False
         return
-    print("[stm32] " + text)
+    if DEBUG or any(k in text for k in ("ABORT", "ERROR", "refused", "FAILED")):
+        print("[stm32] " + text)                     # race mode: problems only
     stm_log.append(text)
     track_stm32(text)
 
@@ -1715,6 +1728,13 @@ handle_rx.pushed = False
 
 
 def main():
+    global DEBUG
+    import argparse
+    ap = argparse.ArgumentParser(description="Obstacle-round sensor feed for the STM32")
+    ap.add_argument("--debug", action="store_true",
+                    help="web page on :%d, camera stream, recorder, console status" % FLASK_PORT)
+    DEBUG = DEBUG or ap.parse_args().debug
+
     PI.set("BEARING_TOL_DEG", load_tol())      # config.json first ...
     msg = prm.load(PI, STM)                    # ... tuning.json overrides it if it has one
     sync_globals()
@@ -1731,15 +1751,18 @@ def main():
     link["serial_ok"] = True
 
     shared = SharedState()
-    lidar = LidarThread(shared)
+    lidar = LidarThread(shared, publish=False)   # nothing here reads SharedState
     lidar.start()
-    RECORDER.start()
     vis = VisionThread()
     vis.start()
-    threading.Thread(target=run_flask, name="Flask", daemon=True).start()
-
-    print(f"[obstacle] lidar+camera -> {UART_PORT}. "
-          f"Page on http://<pi>:{FLASK_PORT}. Ctrl-C to stop.")
+    if DEBUG:
+        RECORDER.start()
+        threading.Thread(target=run_flask, name="Flask", daemon=True).start()
+        print(f"[obstacle] DEBUG: lidar+camera -> {UART_PORT}. "
+              f"Page on http://<pi>:{FLASK_PORT}. Ctrl-C to stop.")
+    else:
+        print(f"[obstacle] RACE mode: lidar+camera -> {UART_PORT}, no web page / recorder / "
+              f"status. START with the STM32 button. --debug for the page.")
 
     last_log = time.monotonic()
     was_live = False
@@ -1752,7 +1775,8 @@ def main():
     cone_rev = -1
     frames = 0
     v = vision_now(time.monotonic())
-    STM.request_dump()                      # ask who it is as soon as it answers
+    if DEBUG:
+        STM.request_dump()                  # ask who it is as soon as it answers (table off since v10)
     retry = None                            # a line the port would not take
 
     def write(data):
@@ -1776,8 +1800,11 @@ def main():
                     write(c)
                 print(f"[obstacle] sent {CMD_NAME[c]}")
 
-            # 2. tuning, rate-limited so the frame feed keeps its slot
-            if retry is not None:
+            # 2. tuning, rate-limited so the frame feed keeps its slot (debug only:
+            #    the firmware's parameter table is off since v10)
+            if not DEBUG:
+                pass
+            elif retry is not None:
                 if write(retry):
                     retry = None
             else:
@@ -1792,7 +1819,8 @@ def main():
                 if lidar.rev != cone_rev:            # bins only change once per rev
                     cone_rev = lidar.rev
                     cl, cr, yaw, lline, rline = cones_full(lidar._ranges)
-                    cands = lidar_candidates(lidar._ranges, lline, rline)
+                    if DEBUG:                        # uX/uY: shown on the page, ignored by the firmware
+                        cands = lidar_candidates(lidar._ranges, lline, rline)
                     faces = lot_faces(lidar._ranges)
                 strip = front_strip(lidar._ranges)  # every frame: the guard is time-critical
                 v = vision_now(now)
@@ -1832,6 +1860,11 @@ def main():
             if now - last_log >= 1.0:
                 link["hz"] = frames / (now - last_log)
                 frames = 0
+                last_log = now
+                show = DEBUG
+            else:
+                show = False
+            if show:
                 fmt = lambda x: "----" if x is None else f"{int(x):4d}"
                 name = {COL_RED: "RED", COL_GREEN: "GRN"}.get(v["color"], "---")
                 print(f"[obstacle] F {fmt(f)} L {fmt(l)} R {fmt(r)} mm | "
@@ -1840,7 +1873,6 @@ def main():
                       f"{link['hz']:.0f} Hz queue {lidar.queue_depth()}"
                       f"{'' if live else '  (STALE)'}"
                       f"{'  (NO CAMERA)' if vis.error else ''}")
-                last_log = now
 
             time.sleep(1.0 / max(1, SEND_HZ))
     except KeyboardInterrupt:
@@ -1859,8 +1891,9 @@ def main():
         lidar.stop()
         vis.join(timeout=2.0)
         lidar.join(timeout=2.0)
-        RECORDER.stop()                       # after the camera: closes frames.csv
-        RECORDER.join(timeout=2.0)
+        if RECORDER.is_alive():
+            RECORDER.stop()                   # after the camera: closes frames.csv
+            RECORDER.join(timeout=2.0)
         ser.close()
         print("[obstacle] stopped")
 
